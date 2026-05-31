@@ -1,0 +1,8 @@
+interface:
+  display_name: "Open Ultrawork"
+  short_description: "多模型 Dynamic Workflows 調度（通用版）"
+  default_prompt: "Plan a token-budgeted multi-model workflow using the open-ultrawork conventions."
+policy:
+  allow_implicit_invocation: true   # 僅適用 S/M 級別；L/XL fan-out 必須在執行前取得使用者明確授權，不得以隱式調用代替授權確認
+  invocation_notes: |
+    本 skill 在 L/XL 規模（≥16 subagents 或多輪 fan-out）時，須由主控代理在啟動前向使用者說明任務範圍、token 預算與停止條件，並取得明確確認後方可展開工作流。隱式調用不等同於使用者已授權 L/XL fan-out；runtime 仍須在偵測到大規模任務時主動詢問確認。
