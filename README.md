@@ -4,6 +4,28 @@
 
 `open-ultrawork` 不是一個 runtime，也不是某個 app 自帶的魔法能力；它是一份**以 Claude Code Dynamic Workflows 為核心、延伸到多 AI 廠牌協作的工作流規範 / skill**，用來定義多模型協作時的角色邊界、授權規則、預算上限、驗證方式與安全收斂流程。
 
+## Companion project / 搭配專案
+
+This repo is designed to pair with **[codex-app-model-gateway](https://github.com/JNSlayer2/codex-app-model-gateway)**.
+
+- **`open-ultrawork`** defines the **workflow logic**: how to use multiple AI brands and multiple model tiers for parallel exploration, adversarial validation, convergence, and cost control.
+- **`codex-app-model-gateway`** defines the **runtime bridge**: how to make Codex App reliably route the same thread into other AI models such as Claude, Grok, or future adapters, while preserving Codex App tools and request-scoped control.
+
+In short:
+
+> `open-ultrawork` tells you **how to orchestrate multi-AI work**.  
+> `codex-app-model-gateway` helps Codex App **actually connect to those other models**.
+
+本 repo 是跟 **[codex-app-model-gateway](https://github.com/JNSlayer2/codex-app-model-gateway)** 搭配使用的一組 skill。
+
+- **`open-ultrawork`** 負責**工作流邏輯**：定義怎麼用多品牌 AI、不同重量級模型做平行探索、對抗驗證、收斂與成本控制。
+- **`codex-app-model-gateway`** 負責**接入層 / runtime bridge**：讓 Codex App 能穩定把同一條 thread 接到 Claude、Grok 或未來其他模型，同時保留 Codex App 的工具控制與 request-scoped bridge。
+
+簡單講：
+
+> `open-ultrawork` 告訴你**多 AI 協作要怎麼編排**。  
+> `codex-app-model-gateway` 負責讓 Codex App **真的接得到那些他牌模型**。
+
 ## 中文說明：這個 skill 是做什麼的？
 
 這個 skill 的重點不是一般的「多模型一起聊聊看」，而是把 **Claude Code 的 Dynamic Workflows / ultracode** 擴展成一套**多 AI 廠牌協作版工作流**。
@@ -64,6 +86,8 @@
 
 `open-ultrawork` 就是在 **Claude 推出 ultrawork / Dynamic Workflows**，以及我對這個趨勢的判斷之下寫出來的：  
 它的目的，是替這種「高階訂閱模型 + 低成本模型 + 多 AI 廠牌協作」提供一套可落地、可控、可驗證的工作流規範。
+
+這也代表在**重型專案**裡，你可以把昂貴模型留給真正需要高智力與高判斷力的步驟，把大量探索、驗證、反駁、整理工作交給低廉甚至本地模型處理，整體會**省非常多錢**。
 
 ### 核心用途
 
