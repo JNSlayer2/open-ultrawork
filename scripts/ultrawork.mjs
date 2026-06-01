@@ -45,7 +45,10 @@ import crypto from "node:crypto";
 const HOME = os.homedir();
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
 const CODEX_COMMAND = process.env.CODEX_COMMAND || "codex";
-const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, ".codex"); // SSD, never a noowners volume
+// Prefer a dedicated SSD sub-home for codex subagents so codex exec never touches a
+// noowners external volume (which can stall the controller). Falls back to ~/.codex.
+const CODEX_HOME = process.env.UW_CODEX_HOME
+  || (fs.existsSync(path.join(HOME, ".codex-sub")) ? path.join(HOME, ".codex-sub") : path.join(HOME, ".codex"));
 const GATEWAY_URL = (process.env.UW_GATEWAY_URL || "http://127.0.0.1:4177").replace(/\/+$/, "");
 const TIMEOUT_MS = Number(process.env.UW_TIMEOUT_MS || 600000);
 const CONCURRENCY = Number(process.env.UW_CONCURRENCY || Math.max(2, Math.min(8, os.cpus().length - 2)));
@@ -383,11 +386,16 @@ export async function verify(claim, opts = {}) {
     ),
   );
   const valid = votes.filter(Boolean);
+  const failed = tiers.length - valid.length;
   const refuted = valid.filter((v) => v.refuted === true || String(v.refuted).toLowerCase() === "true").length;
-  // Refutes needed to mark NOT confirmed. Default = majority (floor(n/2)+1):
-  // a single pedantic refuter cannot veto an otherwise-sound claim.
-  const threshold = opts.threshold ?? Math.floor(valid.length / 2) + 1;
-  return { confirmed: valid.length > 0 && refuted < threshold, refuted, total: valid.length, votes: valid };
+  // Quorum: a majority of the REQUESTED verifiers must have actually returned a vote,
+  // else the verdict is untrusted (never confirm on one lucky non-refute when the rest failed).
+  const quorum = Math.floor(tiers.length / 2) + 1;
+  // Refutes-to-veto threshold counts against ALL requested verifiers; failed votes are
+  // treated as uncertain (count toward not-confirmed), never as silent passes.
+  const threshold = opts.threshold ?? Math.floor(tiers.length / 2) + 1;
+  const confirmed = valid.length >= quorum && refuted + failed < threshold;
+  return { confirmed, refuted, failed, total: tiers.length, valid: valid.length, votes: valid };
 }
 
 /**
