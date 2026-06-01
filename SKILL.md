@@ -30,7 +30,9 @@ const v = await verify("the merge is correct", { tiers: ["fast", "economy", "sta
 log(costReport());
 ```
 
-執行：`node my-workflow.mjs`。Hooks：`agent(prompt,{tier|backend,model,schema,retries,label})`、`parallel(thunks,{concurrency})`、`pipeline(items,...stages)`、`verify(claim,{tiers,threshold})`、`setBudget(usd)`、`costReport()`、`log`。
+執行：`node my-workflow.mjs`。Hooks：`agent(prompt,{tier|backend,model,schema,retries,label})`、`parallel(thunks,{concurrency})`、`pipeline(items,...stages)`、`verify(claim,{tiers,threshold})`、`setBudget(usd)`、`costReport()`、`report({file,summary,result})`、`log`。
+
+**context 省用關鍵**：subagent 的 context 在各自子進程，不進主控 thread；主控只吸收腳本印出來的東西。用 `report()` 把所有 subagent 輸出寫進檔案、stdout 只回一行指標（`✅ done … → report: <path>`），即使 fan-out 很大，主控（如 Codex App on GPT）的 context 幾乎不動。`UW_QUIET=1` 連 per-agent log 也靜音。
 
 Tier（意圖 → backend:model，env `UW_TIER_<NAME>="backend:model"` 可覆寫）：`economy`/`fast`/`standard`/`heavy`/`judge`。後端：`gateway`（POST `$UW_GATEWAY_URL/v1/responses`，任何 slug）、`claude`（`claude -p`，無 session/工具）、`codex`（`codex exec`，sandbox read-only）。搭配 [codex-app-model-gateway](https://github.com/JNSlayer2/codex-app-model-gateway) 提供單一 gateway provider 即可路由全部 tier。範例：`node scripts/example-flow.mjs`。
 

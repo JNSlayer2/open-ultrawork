@@ -1,6 +1,6 @@
 // example-flow.mjs — cost-tiered ultrawork run. Bulk fan-out on near-free economy
 // model (MiniMax M3), premium reserved for synthesis. Run: node example-flow.mjs
-import { agent, parallel, log, costReport } from "./ultrawork.mjs";
+import { agent, parallel, log, report } from "./ultrawork.mjs";
 
 const angles = [
   "用一句話:為什麼並行 subagent 比單一長 context 省 token?",
@@ -19,5 +19,6 @@ const summary = await agent(
   { tier: "economy", label: "synth" },
 );
 
-console.log("\n===== RESULT =====\n" + summary + "\n");
-log(costReport());
+// Detail (all subagent outputs + cost) goes to a file; stdout gets ONE line,
+// so a controller like Codex App absorbs a pointer, not every subagent's context.
+report({ summary: `${angles.length} economy drafts + synthesis`, result: summary });

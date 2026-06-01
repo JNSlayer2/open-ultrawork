@@ -84,9 +84,11 @@ for (const name of Object.keys(TIERS)) {
   }
 }
 
+const QUIET = process.env.UW_QUIET === "1";
 let AGENT_SEQ = 0;
 const startedAt = Date.now();
 const ledger = []; // { tier, backend, model, tokens, usd, ms, ok }
+const transcript = []; // { id, label, tier, backend, model, ms, usd, ok, text, error }
 const resumeCache = new Map();
 if (RESUME) {
   try {
@@ -102,7 +104,40 @@ function stamp() {
   return `+${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
 }
 export function log(msg) {
+  if (QUIET) return;
   process.stderr.write(`[ultrawork ${stamp()}] ${msg}\n`);
+}
+
+/**
+ * Write a full run report (all subagent outputs + cost) to a file and print
+ * only ONE line to stdout — so a controller (e.g. Codex App on GPT) absorbs a
+ * pointer, not the sum of every subagent's context. Read the file on demand.
+ * @param {{file?:string, summary?:string, result?:any, maxChars?:number}} [opts]
+ * @returns {string} report file path
+ */
+export function report(opts = {}) {
+  const file = opts.file || path.join(os.tmpdir(), `uw-report-${Date.now()}.md`);
+  const ok = transcript.filter((t) => t.ok).length;
+  const L = [
+    `# ultrawork run report`,
+    `- elapsed: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+    `- subagents: ${transcript.length} (ok ${ok}, failed ${transcript.length - ok})`,
+    `- est cost: ~$${spentUSD().toFixed(4)}`,
+    ``, `## cost`, "```", costReport(), "```",
+    ``, `## subagents`,
+  ];
+  for (const t of transcript) {
+    L.push(`### ${t.label} — ${t.model} (${(t.ms / 1000).toFixed(1)}s, ~$${(t.usd || 0).toFixed(4)})`);
+    if (!t.ok) { L.push(`**failed:** ${t.error || ""}`, ``); continue; }
+    L.push("```", String(t.text || "").slice(0, opts.maxChars || 20000), "```", ``);
+  }
+  if (opts.result !== undefined) {
+    L.push(`## result`, typeof opts.result === "string" ? opts.result : "```json\n" + JSON.stringify(opts.result, null, 2) + "\n```");
+  }
+  fs.writeFileSync(file, L.join("\n"));
+  const summary = opts.summary || `${transcript.length} subagents, ~$${spentUSD().toFixed(4)}`;
+  process.stdout.write(`✅ ultrawork done: ${summary} → report: ${file}\n`);
+  return file;
 }
 function journal(rec) {
   if (!JOURNAL) return;
@@ -304,6 +339,7 @@ export async function agent(prompt, opts = {}) {
       const usd = recordCost(model, tok);
       ledger.push({ tier: opts.tier, backend, model, tokens: tok, usd, ms: Date.now() - t0, ok: true });
       let value = opts.schema ? parseJsonLoose(text, label) : text;
+      transcript.push({ id, label, tier: opts.tier, backend, model, ms: Date.now() - t0, usd, ok: true, text });
       journal({ id, key, label, backend, model, tokens: tok, usd, ms: Date.now() - t0, ok: true, result: value });
       log(`✓ ${label} (${((Date.now() - t0) / 1000).toFixed(1)}s, ~$${usd.toFixed(4)})`);
       return value;
@@ -313,6 +349,7 @@ export async function agent(prompt, opts = {}) {
     }
   }
   ledger.push({ tier: opts.tier, backend, model, ms: Date.now() - t0, ok: false });
+  transcript.push({ id, label, tier: opts.tier, backend, model, ms: Date.now() - t0, ok: false, error: lastErr?.message });
   journal({ id, key, label, backend, model, ms: Date.now() - t0, ok: false, error: lastErr?.message });
   log(`✗ ${label}: ${lastErr?.message}`);
   throw lastErr;
