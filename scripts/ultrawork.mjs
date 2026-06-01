@@ -87,6 +87,165 @@ for (const name of Object.keys(TIERS)) {
   }
 }
 
+
+// Task profiles encode the *shape* of useful multi-model collaboration. They are
+// deliberately advisory: callers still decide scope, budget, and whether the
+// current task is too small to justify ultrawork at all.
+export const TASK_PROFILES = Object.freeze({
+  ui: {
+    id: "ui",
+    aliases: ["ui", "frontend", "design", "style", "moodboard", "component"],
+    level: "L",
+    primary: "gpt-5.5",
+    economy: ["minimax-m3"],
+    heavy: ["opus-4-8"],
+    maxAgents: 24,
+    companionSkills: [],
+    stopConditions: ["top-N candidates converge to 2-3 directions", "no new visual direction after 2 rounds"],
+    verification: ["screenshot or prototype evidence", "brand/accessibility checklist"],
+  },
+  review: {
+    id: "review",
+    aliases: ["review", "pr", "code review", "diff", "lint", "test"],
+    level: "M",
+    primary: "gpt-5.5",
+    economy: ["minimax-m3"],
+    heavy: ["opus-4-8"],
+    maxAgents: 12,
+    companionSkills: [],
+    stopConditions: ["every diff-scoped file has a receipt", "false positives pruned by reviewer"],
+    verification: ["git diff", "tests/lint", "reviewer risk pass"],
+  },
+  env: {
+    id: "env",
+    aliases: ["env", "environment", "gateway", "openclaw", "setup", "install", "runtime", "launchagent"],
+    level: "M",
+    primary: "gpt-5.5",
+    economy: ["minimax-m3"],
+    heavy: ["opus-4-8"],
+    maxAgents: 16,
+    companionSkills: ["gitnexus:gitnexus"],
+    stopConditions: ["health endpoint verified", "rollback path recorded", "secrets redacted"],
+    verification: ["process/port", "config path", "health probe", "rollback evidence"],
+  },
+  security: {
+    id: "security",
+    aliases: ["security", "auth", "secret", "vulnerability", "attack", "threat", "permission"],
+    level: "L",
+    primary: "gpt-5.5",
+    economy: ["minimax-m3", "grok-build"],
+    heavy: ["opus-4-8"],
+    maxAgents: 32,
+    companionSkills: ["codex-security:security-diff-scan"],
+    stopConditions: ["diff scope exhausted", "candidate ledgers validated", "attack path accepted or suppressed"],
+    verification: ["source-to-sink evidence", "exploitability validation", "no secret leakage"],
+  },
+  migration: {
+    id: "migration",
+    aliases: ["migration", "refactor", "architecture", "large", "multi-file", "rewrite"],
+    level: "L",
+    primary: "gpt-5.5",
+    economy: ["minimax-m3"],
+    heavy: ["opus-4-8", "claude-opus-4-8[1m]"],
+    maxAgents: 32,
+    companionSkills: ["gitnexus:gitnexus"],
+    stopConditions: ["impact map stable", "checkpoint and rollback recorded", "test matrix green enough for phase"],
+    verification: ["GitNexus/grep impact evidence", "tests", "diff review"],
+  },
+  memory: {
+    id: "memory",
+    aliases: ["memory", "skill", "skills", "gbrain", "distill", "documentation", "superpowers"],
+    level: "M",
+    primary: "gpt-5.5",
+    economy: ["minimax-m3"],
+    heavy: ["opus-4-8"],
+    maxAgents: 8,
+    companionSkills: ["superpowers:writing-skills"],
+    stopConditions: ["stable lesson distilled", "raw/private state excluded", "skill body remains actionable"],
+    verification: ["self-test or pressure scenario", "diff review", "trigger wording check"],
+  },
+});
+
+const PROFILE_ALIAS = new Map();
+for (const p of Object.values(TASK_PROFILES)) {
+  PROFILE_ALIAS.set(p.id, p.id);
+  for (const a of p.aliases || []) PROFILE_ALIAS.set(String(a).toLowerCase(), p.id);
+}
+
+export function profile(name = "env") {
+  const key = PROFILE_ALIAS.get(String(name).toLowerCase()) || "env";
+  return { ...TASK_PROFILES[key], aliases: [...TASK_PROFILES[key].aliases], economy: [...TASK_PROFILES[key].economy], heavy: [...TASK_PROFILES[key].heavy], companionSkills: [...TASK_PROFILES[key].companionSkills], stopConditions: [...TASK_PROFILES[key].stopConditions], verification: [...TASK_PROFILES[key].verification] };
+}
+
+export function profileForTask(task = "") {
+  const text = typeof task === "string" ? task : [task.task, task.taskType, task.domain, task.goal].filter(Boolean).join(" ");
+  const lower = text.toLowerCase();
+  // Prefer higher-risk/specialized profiles when generic words like "review" or
+  // "diff" co-occur with security or migration terms.
+  const priority = ["security", "migration", "env", "ui", "memory", "review"];
+  for (const id of priority) {
+    const p = TASK_PROFILES[id];
+    if (p.aliases.some((a) => lower.includes(String(a).toLowerCase()))) return profile(p.id);
+  }
+  return profile("env");
+}
+
+export function companionSkillsFor(opts = {}) {
+  const taskText = typeof opts === "string" ? opts : [opts.task, opts.taskType, opts.domain, opts.goal].filter(Boolean).join(" ");
+  const p = profileForTask(taskText || opts.taskType || "");
+  const found = new Map();
+  const add = (id, when, mode = "use-when-triggered") => found.set(id, { id, when, mode });
+
+  for (const id of p.companionSkills || []) add(id, `profile:${p.id}`);
+  if (opts.wantsProjectMap || opts.impactRange || /gitnexus|project map|專案地圖|入口|影響範圍|impact/i.test(taskText)) {
+    add("gitnexus:gitnexus", "project map / entrypoints / impact range requested", "passive-explicit-trigger");
+  }
+  if (opts.securitySensitive || opts.hasDiff || /security|vulnerability|auth|secret|permission|安全|漏洞|權限|diff|PR/i.test(taskText)) {
+    add("codex-security:security-diff-scan", "security-sensitive diff or review", "route-to-plugin-skill");
+  }
+  if (opts.skillAuthoring || /skill|skills|superpowers|TDD|process documentation|技能/i.test(taskText)) {
+    add("superpowers:writing-skills", "skill authoring or process-doc improvement", "route-to-plugin-skill");
+  }
+  return [...found.values()];
+}
+
+export function shouldUseUltrawork(opts = {}) {
+  const text = typeof opts === "string" ? opts : String(opts.task || opts.goal || "");
+  const fileCount = Number(opts.fileCount || 0);
+  const risk = String(opts.risk || "").toLowerCase();
+  const needsParallelism = Boolean(opts.needsParallelism || opts.multiModel || opts.adversarial || opts.needsReview);
+  const small = fileCount <= 1 && !needsParallelism && !/(security|migration|architecture|trading|gateway|multi|review|大量|多模型|架構|安全)/i.test(text);
+  if (small && (risk === "" || risk === "low" || risk === "低")) {
+    return {
+      use: false,
+      level: "S",
+      reminder: "This looks like a single-model task; remind the human that ultrawork may add coordination overhead and ask/continue with the simpler path.",
+    };
+  }
+  const p = profileForTask(text || opts.taskType || "");
+  return { use: true, level: p.level, profile: p.id, reminder: "Use the lowest profile that covers the risk; avoid L/XL fan-out without explicit authorization." };
+}
+
+export function budgetPlan(name = "env", opts = {}) {
+  const p = profile(name);
+  const minimaxPlanConfirmed = Boolean(opts.minimaxPlanConfirmed || process.env.UW_MINIMAX_PLAN_CONFIRMED === "1");
+  const scale = opts.scale || p.level;
+  const maxAgents = Number(opts.maxAgents || (minimaxPlanConfirmed ? p.maxAgents : Math.min(p.maxAgents, 4)));
+  return {
+    profile: p.id,
+    level: scale,
+    primary: p.primary,
+    economy: p.economy,
+    heavy: p.heavy,
+    economyLane: minimaxPlanConfirmed ? "bulk" : "metered-or-unconfirmed",
+    maxAgents,
+    maxRounds: Number(opts.maxRounds || (scale === "XL" ? 3 : scale === "L" ? 2 : 1)),
+    maxOutputTokensPerAgent: Number(opts.maxOutputTokensPerAgent || 1200),
+    stopConditions: [...p.stopConditions, "hard budget reached", "human stop"],
+    verification: p.verification,
+  };
+}
+
 const QUIET = process.env.UW_QUIET === "1";
 let AGENT_SEQ = 0;
 const startedAt = Date.now();
@@ -438,4 +597,4 @@ export async function pipeline(items, ...stages) {
   );
 }
 
-export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, TIERS, COST_PER_MTOK };
+export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, TIERS, COST_PER_MTOK, TASK_PROFILES };
