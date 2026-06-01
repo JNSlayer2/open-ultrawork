@@ -1,0 +1,396 @@
+// ultrawork.mjs — portable cost-tiered multi-model subagent orchestrator (no deps, Node ESM).
+//
+// This is the *runtime* the ultrawork-claude skill was missing, and it is built
+// to BEAT a single-vendor Workflow tool on the two axes a multi-AI setup wins:
+//
+//   1. COST TIERING — bulk fan-out runs on near-free economy models (MiniMax M3,
+//      gpt-5.4-mini) while only synthesis/verification spends premium Opus/GPT-5.5.
+//      An all-Claude Workflow burns premium quota on every subagent; this does not.
+//   2. VENDOR-DIVERSE VERIFICATION — adversarial checks use genuinely different
+//      models (Claude + GPT + Grok + MiniMax), catching failure modes that N
+//      identical skeptics share.
+//
+// Each agent() = one subprocess / HTTP call with a FRESH context (no shared
+// history), so the controller's own context stays small.
+//
+//   import { agent, parallel, pipeline, verify, log, costReport } from "./ultrawork.mjs";
+//   const drafts = await parallel(files.map(f => () => agent(`review ${f}`, { tier: "economy" })));
+//   const merged = await agent("merge:\n" + drafts.join("\n---\n"), { tier: "heavy" });
+//   const v = await verify("the merge is correct", { tiers: ["fast","economy","standard"] });
+//   log(costReport());
+//
+//   $ node my-workflow.mjs
+//
+// Backends (all isolated context):
+//   gateway -> POST $UW_GATEWAY_URL/v1/responses (any slug: minimax-m3 / grok-build / opus-4-8 ...)
+//   claude  -> claude -p   (JSON, no session, no tools/MCP)
+//   codex   -> codex exec  (economy GPT, read-only sandbox, MCP off)
+//
+// Tiers map intent -> (backend, model) and are the recommended way to call agent():
+//   economy  cheapest capable    -> gateway minimax-m3      (bulk fan-out, drafts, extraction)
+//   fast     cheap + quick        -> codex   gpt-5.4-mini    (local economy, sandboxed)
+//   standard mid                  -> gateway grok-build      (reasoning without premium cost)
+//   heavy    best reasoning       -> claude  claude-opus-4-8[1m]  (synthesis, hard problems)
+//   judge    premium verification -> gateway opus-4-8        (final adjudication)
+//
+// Env: CLAUDE_COMMAND CODEX_COMMAND CODEX_HOME UW_GATEWAY_URL UW_CONCURRENCY
+//      UW_JOURNAL UW_RESUME UW_BUDGET_USD UW_TIMEOUT_MS UW_TIER_<NAME>="backend:model"
+
+import { spawn } from "node:child_process";
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+
+const HOME = os.homedir();
+const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
+const CODEX_COMMAND = process.env.CODEX_COMMAND || "codex";
+const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, ".codex"); // SSD, never a noowners volume
+const GATEWAY_URL = (process.env.UW_GATEWAY_URL || "http://127.0.0.1:4177").replace(/\/+$/, "");
+const TIMEOUT_MS = Number(process.env.UW_TIMEOUT_MS || 600000);
+const CONCURRENCY = Number(process.env.UW_CONCURRENCY || Math.max(2, Math.min(8, os.cpus().length - 2)));
+const JOURNAL = process.env.UW_JOURNAL || "";
+const RESUME = process.env.UW_RESUME === "1" && !!JOURNAL;
+let BUDGET_USD = process.env.UW_BUDGET_USD ? Number(process.env.UW_BUDGET_USD) : Infinity;
+
+// Rough $/1M tokens (blended in/out) — used only for budget signalling, not billing.
+// Tune freely; economy tiers are ~free relative to premium.
+const COST_PER_MTOK = {
+  "minimax-m3": 0.3,
+  "gpt-5.4-mini": 0.4,
+  "grok-build": 2,
+  "claude-haiku-4-5": 1,
+  "claude-sonnet-4-6": 4,
+  "claude-opus-4-8": 20,
+  "claude-opus-4-8[1m]": 20,
+  "opus-4-8": 20,
+  "gpt-5.5": 12,
+};
+const DEFAULT_COST = 3;
+
+// Tier -> backend:model. Override any tier via env UW_TIER_ECONOMY="claude:haiku" etc.
+const TIERS = {
+  economy: { backend: "gateway", model: "minimax-m3" },
+  fast: { backend: "codex", model: "gpt-5.4-mini" },
+  standard: { backend: "gateway", model: "grok-build" },
+  heavy: { backend: "claude", model: "claude-opus-4-8[1m]" },
+  judge: { backend: "gateway", model: "opus-4-8" },
+};
+for (const name of Object.keys(TIERS)) {
+  const ov = process.env[`UW_TIER_${name.toUpperCase()}`];
+  if (ov && ov.includes(":")) {
+    const [backend, ...rest] = ov.split(":");
+    TIERS[name] = { backend, model: rest.join(":") };
+  }
+}
+
+let AGENT_SEQ = 0;
+const startedAt = Date.now();
+const ledger = []; // { tier, backend, model, tokens, usd, ms, ok }
+const resumeCache = new Map();
+if (RESUME) {
+  try {
+    for (const line of fs.readFileSync(JOURNAL, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const r = JSON.parse(line);
+      if (r.ok && r.key && r.result !== undefined) resumeCache.set(r.key, r.result);
+    }
+  } catch {}
+}
+
+function stamp() {
+  return `+${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+}
+export function log(msg) {
+  process.stderr.write(`[ultrawork ${stamp()}] ${msg}\n`);
+}
+function journal(rec) {
+  if (!JOURNAL) return;
+  try {
+    fs.appendFileSync(JOURNAL, JSON.stringify(rec) + "\n");
+  } catch {}
+}
+export function setBudget(usd) {
+  BUDGET_USD = Number(usd);
+}
+function estTokens(text) {
+  return Math.ceil(String(text || "").length / 4);
+}
+function recordCost(model, tokens) {
+  const rate = COST_PER_MTOK[model] ?? DEFAULT_COST;
+  return (tokens / 1_000_000) * rate;
+}
+export function spentUSD() {
+  return ledger.reduce((s, e) => s + (e.usd || 0), 0);
+}
+export function costReport() {
+  const byModel = {};
+  for (const e of ledger) {
+    const k = `${e.tier || e.backend}:${e.model}`;
+    byModel[k] = byModel[k] || { calls: 0, tokens: 0, usd: 0 };
+    byModel[k].calls++;
+    byModel[k].tokens += e.tokens || 0;
+    byModel[k].usd += e.usd || 0;
+  }
+  const lines = Object.entries(byModel)
+    .sort((a, b) => b[1].usd - a[1].usd)
+    .map(([k, v]) => `  ${k}: ${v.calls} calls, ~${v.tokens} tok, ~$${v.usd.toFixed(4)}`);
+  return `cost report (estimates):\n${lines.join("\n")}\n  TOTAL ~$${spentUSD().toFixed(4)}`;
+}
+
+function run(cmd, args, { input = "", env = process.env, timeoutMs = TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (err) {
+      return resolve({ ok: false, code: null, stdout: "", stderr: `spawn failed: ${err.message}` });
+    }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2000).unref();
+      finish({ ok: false, code: null, stdout, stderr: stderr + `\n[timeout ${timeoutMs}ms]` });
+    }, timeoutMs);
+    timer.unref();
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (err) => finish({ ok: false, code: null, stdout, stderr: `${stderr}\n${err.message}` }));
+    child.on("close", (code) => finish({ ok: code === 0, code, stdout, stderr }));
+    if (input) child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+// Derive a bare family alias (opus/sonnet/haiku) as a last-resort claude fallback.
+function claudeFamily(model) {
+  const m = /opus|sonnet|haiku/i.exec(model || "");
+  return m ? m[0].toLowerCase() : null;
+}
+
+async function backendClaude(prompt, model, timeoutMs) {
+  const tryModel = async (mdl) => {
+    const args = [
+      "-p", "--model", mdl,
+      "--output-format", "json",
+      "--no-session-persistence",
+      "--mcp-config", '{"mcpServers":{}}',
+      "--strict-mcp-config",
+      "--disable-slash-commands",
+      "--disallowedTools", "*",
+    ];
+    const r = await run(CLAUDE_COMMAND, args, { input: prompt, timeoutMs });
+    let j = null;
+    try { j = JSON.parse(r.stdout); } catch {}
+    return { r, j };
+  };
+  const wanted = model || "claude-opus-4-8[1m]";
+  let { r, j } = await tryModel(wanted);
+  // 404 / unknown-model -> fall back to bare family alias once.
+  if (j?.is_error && /404|model|not found|invalid/i.test(String(j.result || ""))) {
+    const fam = claudeFamily(wanted);
+    if (fam && fam !== wanted) ({ r, j } = await tryModel(fam));
+  }
+  const usage = j?.usage ? (j.usage.input_tokens || 0) + (j.usage.output_tokens || 0) : null;
+  if (j) {
+    if (j.is_error) throw new Error(`claude is_error: ${String(j.result || "").slice(0, 400)}`);
+    return { text: String(j.result ?? ""), tokens: usage };
+  }
+  throw new Error(`claude backend failed (code ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 400)}`);
+}
+
+async function backendCodex(prompt, model, timeoutMs) {
+  const out = path.join(os.tmpdir(), `uw-codex-${crypto.randomBytes(6).toString("hex")}.txt`);
+  const args = [
+    "exec", "-m", model || "gpt-5.4-mini",
+    "--sandbox", "read-only",
+    "--skip-git-repo-check",
+    "-c", "mcp_servers={}",
+    "-C", os.tmpdir(),
+    "-o", out,
+  ];
+  const env = { ...process.env, CODEX_HOME };
+  const r = await run(CODEX_COMMAND, args, { input: prompt, env, timeoutMs });
+  let text = "";
+  try { text = fs.readFileSync(out, "utf8").trim(); fs.unlinkSync(out); } catch {}
+  if (!text && !r.ok) throw new Error(`codex backend failed (code ${r.code}): ${r.stderr.trim().slice(0, 400)}`);
+  const m = /tokens used[\s\S]*?([\d,]+)/i.exec(r.stdout + r.stderr);
+  const tokens = m ? Number(m[1].replace(/,/g, "")) : null;
+  return { text, tokens };
+}
+
+async function backendGateway(prompt, model, timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${GATEWAY_URL}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        model: model || "minimax-m3",
+        stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: prompt }] }],
+      }),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(`gateway ${res.status}: ${JSON.stringify(j).slice(0, 300)}`);
+    const text = String(j.output_text ?? j.output?.[0]?.content?.[0]?.text ?? "");
+    const tokens = j.usage ? (j.usage.input_tokens || 0) + (j.usage.output_tokens || 0) : null;
+    return { text, tokens };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+const BACKENDS = { claude: backendClaude, codex: backendCodex, gateway: backendGateway };
+
+function resolve(opts) {
+  let backend = opts.backend;
+  let model = opts.model;
+  if (opts.tier) {
+    const t = TIERS[opts.tier];
+    if (!t) throw new Error(`unknown tier: ${opts.tier} (${Object.keys(TIERS).join("|")})`);
+    backend = backend || t.backend;
+    model = model || t.model;
+  }
+  backend = backend || "gateway";
+  return { backend, model };
+}
+
+/**
+ * Spawn one isolated-context subagent.
+ * @param {string} prompt
+ * @param {{tier?:string, backend?:string, model?:string, label?:string, schema?:object,
+ *          retries?:number, timeoutMs?:number}} [opts]
+ * @returns {Promise<string|object>} text, or parsed object when schema is given
+ */
+export async function agent(prompt, opts = {}) {
+  const id = ++AGENT_SEQ;
+  const { backend, model } = resolve(opts);
+  const fn = BACKENDS[backend];
+  if (!fn) throw new Error(`unknown backend: ${backend} (claude|codex|gateway)`);
+  const label = opts.label || `${opts.tier || backend}#${id}`;
+  let fullPrompt = prompt;
+  if (opts.schema) {
+    fullPrompt =
+      `${prompt}\n\nRespond with ONLY one raw JSON object matching this shape (no prose, no code fence):\n` +
+      JSON.stringify(opts.schema);
+  }
+  const key = crypto.createHash("sha1").update(`${backend}|${model}|${fullPrompt}`).digest("hex");
+  if (RESUME && resumeCache.has(key)) {
+    log(`⤿ ${label} (resumed from journal)`);
+    return resumeCache.get(key);
+  }
+  if (spentUSD() >= BUDGET_USD) {
+    throw new Error(`budget exhausted: ~$${spentUSD().toFixed(4)} >= $${BUDGET_USD}`);
+  }
+  const retries = opts.retries ?? 1;
+  const t0 = Date.now();
+  log(`▶ ${label} (${model || "default"})`);
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const { text, tokens } = await fn(fullPrompt, model, opts.timeoutMs || TIMEOUT_MS);
+      const tok = tokens ?? estTokens(fullPrompt) + estTokens(text);
+      const usd = recordCost(model, tok);
+      ledger.push({ tier: opts.tier, backend, model, tokens: tok, usd, ms: Date.now() - t0, ok: true });
+      let value = opts.schema ? parseJsonLoose(text, label) : text;
+      journal({ id, key, label, backend, model, tokens: tok, usd, ms: Date.now() - t0, ok: true, result: value });
+      log(`✓ ${label} (${((Date.now() - t0) / 1000).toFixed(1)}s, ~$${usd.toFixed(4)})`);
+      return value;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) log(`↻ ${label} retry ${attempt + 1}/${retries}: ${err.message.slice(0, 120)}`);
+    }
+  }
+  ledger.push({ tier: opts.tier, backend, model, ms: Date.now() - t0, ok: false });
+  journal({ id, key, label, backend, model, ms: Date.now() - t0, ok: false, error: lastErr?.message });
+  log(`✗ ${label}: ${lastErr?.message}`);
+  throw lastErr;
+}
+
+function parseJsonLoose(text, label) {
+  const m = text.match(/\{[\s\S]*\}/);
+  const raw = m ? m[0] : text;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`${label} structured-output parse failed: ${e.message}`);
+  }
+}
+
+/**
+ * Vendor-diverse adversarial verification: run the claim past several DIFFERENT
+ * models, each asked to refute. Returns {confirmed, votes, refuted}.
+ * @param {string} claim
+ * @param {{tiers?:string[], threshold?:number, context?:string}} [opts]
+ */
+export async function verify(claim, opts = {}) {
+  const tiers = opts.tiers || ["fast", "economy", "standard"];
+  const ctx = opts.context ? `\n\nContext:\n${opts.context}` : "";
+  const votes = await parallel(
+    tiers.map((tier, i) => () =>
+      agent(
+        `Try hard to REFUTE this claim. If you find any flaw, it is refuted. Default to refuted=true when uncertain.\n\nClaim: ${claim}${ctx}`,
+        { tier, label: `verify:${tier}`, schema: { refuted: "boolean", reason: "string" } },
+      ).catch(() => null),
+    ),
+  );
+  const valid = votes.filter(Boolean);
+  const refuted = valid.filter((v) => v.refuted === true || String(v.refuted).toLowerCase() === "true").length;
+  // Refutes needed to mark NOT confirmed. Default = majority (floor(n/2)+1):
+  // a single pedantic refuter cannot veto an otherwise-sound claim.
+  const threshold = opts.threshold ?? Math.floor(valid.length / 2) + 1;
+  return { confirmed: valid.length > 0 && refuted < threshold, refuted, total: valid.length, votes: valid };
+}
+
+/**
+ * Run thunks concurrently with a bounded pool. A throwing thunk resolves to null.
+ * @param {Array<() => Promise<any>>} thunks
+ * @param {{concurrency?:number}} [opts]
+ */
+export async function parallel(thunks, opts = {}) {
+  const cap = Math.max(1, opts.concurrency || CONCURRENCY);
+  const results = new Array(thunks.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= thunks.length) return;
+      try {
+        results[i] = await thunks[i]();
+      } catch {
+        results[i] = null;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(cap, thunks.length) }, worker));
+  return results;
+}
+
+/**
+ * Push each item through all stages independently (no barrier between stages).
+ * Each stage gets (prevResult, originalItem, index).
+ * @param {any[]} items
+ * @param {...((prev:any, item:any, i:number) => Promise<any>)} stages
+ */
+export async function pipeline(items, ...stages) {
+  return parallel(
+    items.map((item, i) => async () => {
+      let acc = item;
+      for (const stage of stages) acc = await stage(acc, item, i);
+      return acc;
+    }),
+  );
+}
+
+export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, TIERS, COST_PER_MTOK };

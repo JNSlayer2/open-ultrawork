@@ -11,6 +11,31 @@ metadata:
 
 核心原則：**主控代理負責落地與驗證；Claude Dynamic Workflows 負責大規模探索、並行分派與高品質審稿；外部模型只能在被授權的 request / bridge / thread 範圍內工作。**
 
+> 本 repo 不只規範——`scripts/ultrawork.mjs` 是一支可執行的 reference 編排器（見「可執行編排器」節）。沒有 Claude Code 內建 `Workflow` tool 的主控（如 Codex CLI、其他 agent、人工）也能用 `node` 跑它，真的並行 fan-out 跨廠牌、成本分層的 subagents。
+
+## 可執行編排器：`scripts/ultrawork.mjs`
+
+ultrawork 的「引擎」本質就是一支無依賴 Node 腳本：spawn 模型 CLI / gateway 當 subagent，每個都是**全新獨立 context**，並發池平行跑、收集、收斂。Claude Code 把這包成內建 `Workflow` tool；本腳本讓**任何能執行 shell 的主控**拿到同等能力，且在多廠牌設定下更強：
+
+- **成本分層**：bulk fan-out 走近免費 economy 模型（如 MiniMax M3 / gpt-mini），premium 只留給收斂/裁決。單廠牌 Workflow 每個 subagent 都燒 premium quota；本腳本不會。
+- **跨廠牌對抗驗證**：`verify()` 用**不同廠牌**模型各自反駁，盲點去相關，比 N 個相同 skeptic 更能抓到失效模式。
+- **成本帳 + budget 硬上限、斷點續跑、retry/fallback**。
+
+```js
+import { agent, parallel, pipeline, verify, log, costReport, setBudget } from "./ultrawork.mjs";
+setBudget(1.0);
+const drafts = await parallel(files.map(f => () => agent(`review ${f}`, { tier: "economy" })));
+const merged = await agent("merge:\n" + drafts.join("\n---\n"), { tier: "heavy" });
+const v = await verify("the merge is correct", { tiers: ["fast", "economy", "standard"] });
+log(costReport());
+```
+
+執行：`node my-workflow.mjs`。Hooks：`agent(prompt,{tier|backend,model,schema,retries,label})`、`parallel(thunks,{concurrency})`、`pipeline(items,...stages)`、`verify(claim,{tiers,threshold})`、`setBudget(usd)`、`costReport()`、`log`。
+
+Tier（意圖 → backend:model，env `UW_TIER_<NAME>="backend:model"` 可覆寫）：`economy`/`fast`/`standard`/`heavy`/`judge`。後端：`gateway`（POST `$UW_GATEWAY_URL/v1/responses`，任何 slug）、`claude`（`claude -p`，無 session/工具）、`codex`（`codex exec`，sandbox read-only）。搭配 [codex-app-model-gateway](https://github.com/JNSlayer2/codex-app-model-gateway) 提供單一 gateway provider 即可路由全部 tier。範例：`node scripts/example-flow.mjs`。
+
+> 主控仍是唯一工具執行者與最終驗證者；腳本與其 spawn 的 subagents 都在主控授權範圍內，外部模型不獲得主控的原生工具。各廠牌 auth 由其自身 runtime 管理。
+
 ## 何時使用
 
 使用本 skill 當任務符合任一條件：
