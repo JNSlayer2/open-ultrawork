@@ -26,6 +26,12 @@ In short:
 > `open-ultrawork` 告訴你**多 AI 協作要怎麼編排**。  
 > `codex-app-model-gateway` 負責讓 Codex App **真的接得到那些他牌模型**。
 
+## 快速更新 / Quick update
+
+```bash
+bash scripts/update-skill.sh   # pull + 免額度自檢;exit 0 = 成功
+```
+
 ## 中文說明：這個 skill 是做什麼的？
 
 這個 skill 的重點不是一般的「多模型一起聊聊看」，而是把 **Claude Code 的 Dynamic Workflows / ultracode** 擴展成一套**多 AI 廠牌協作版工作流**。

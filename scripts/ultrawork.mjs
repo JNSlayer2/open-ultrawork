@@ -629,9 +629,20 @@ export async function agent(prompt, opts = {}) {
       log(`✓ ${label} (${((Date.now() - t0) / 1000).toFixed(1)}s, ~$${usd.toFixed(4)})`);
       return value;
     } catch (err) {
+      if (err instanceof BudgetExceeded) throw err;
       lastErr = err;
       if (attempt < retries) log(`↻ ${label} retry ${attempt + 1}/${retries}: ${err.message.slice(0, 120)}`);
     }
+  }
+  // Cross-vendor auth fallback: a stale/invalidated codex OAuth session (401,
+  // "token has been invalidated", refresh-token rotation race) would otherwise
+  // kill the whole copilot lane. Degrade once to a gateway model from another
+  // vendor instead of failing the workflow. Opt out with UW_AUTH_FALLBACK_MODEL=off.
+  const authErr = /\b401\b|unauthorized|invalidated|not authenticated|token.{0,20}(expired|revoked)/i.test(lastErr?.message || "");
+  const fbModel = process.env.UW_AUTH_FALLBACK_MODEL || "grok-build";
+  if (backend === "codex" && authErr && fbModel !== "off" && opts._authFallback !== true) {
+    log(`⚠ ${label}: codex auth failure (re-login needed) → falling back to gateway:${fbModel}`);
+    return agent(prompt, { ...opts, tier: undefined, backend: "gateway", model: fbModel, label: `${label}→fb:${fbModel}`, _authFallback: true });
   }
   ledger.push({ tier: opts.tier, backend, model, ms: Date.now() - t0, ok: false });
   transcript.push({ id, label, tier: opts.tier, backend, model, ms: Date.now() - t0, ok: false, error: lastErr?.message });
