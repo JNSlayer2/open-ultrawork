@@ -39,7 +39,7 @@ In short:
 例如：
 
 - **重型模型**可用來做架構收斂、最終裁決、複雜審稿  
-  例如 GPT-5.4、Opus 4.7、Opus 4.8
+  例如 GPT-5.5、Fable5、Opus 4.7、Opus 4.8
 - **輕型模型**可用來做平行探索、初步分類、查找反例、批量閱讀  
   例如 Sonnet、Haiku、Minimax、Grok
 
@@ -152,6 +152,36 @@ It is useful when a task is too large, risky, or ambiguous for a single model to
 5. **Degradation honesty**
    - If a runtime cannot actually reach Claude Dynamic Workflows, it must degrade honestly instead of pretending full capability exists.
 
+## Premium lane: `mission-critical-max`
+
+`mission-critical-max` is the deliberately most expensive profile. It is for rare, mission-critical tasks where the cost of a bad decision is higher than the cost of premium model review. It is **never auto-selected**.
+
+Activation requires all of:
+
+- the literal opt-in keyword `ultrawork:max`;
+- `mission_critical: true`;
+- explicit human authorization before any premium call;
+- a hard budget ceiling plus a budget floor stop condition;
+- a named task, a Done condition, and declared stop conditions.
+
+Recommended lane split:
+
+| Lane | Public slug / role | Responsibility | Boundary |
+|---|---|---|---|
+| `T0-premium` | `fable-5` / `fable5` | Lead architect, candidate plan, final synthesis | Advisory only; no side effects |
+| `T1-copilot` | `gpt-5.5` | Codex-native critique, plan repair, implementation assistant | Advisory/review; Codex still verifies |
+| `T2-judge` | `opus-4-8` | Conservative, refute-biased judge gate | Must approve before side effects |
+| `T3-scout` | cheaper scout models | Parallel exploration, evidence gathering, counterexamples | Narrow, schema-limited outputs |
+| `executor` | Codex | File writes, shell, tests, deployment, rollback | Only executor for side effects |
+
+Strict flow: scouts explore narrowly → GPT-5.5 critiques and repairs candidate findings → Fable5 may synthesize a candidate plan → an Opus 4.8 refute-biased judge gate must approve → Codex independently verifies against repo/runtime evidence → Codex executes only approved side-effecting steps.
+
+Do **not** use this profile for routine coding, simple reviews, lookups, speculative exploration, latency-sensitive tasks, or tasks without a defined Done condition. Prefer the smallest effective lane.
+
+Workflow artifacts may log counts, tier usage, budget summaries, stop reasons, and redacted decisions. They must not log prompts, secrets, account identifiers, local paths, private hostnames, raw provider payloads, or private thread IDs.
+
+`scripts/ultrawork.mjs` includes public-safe guard helpers for this lane: `resolveTier()`, `requirePremiumAuth()`, `budgetGuard()`, `executorOnly()`, `redactPublic()`, and a fail-closed `runMissionCriticalMax()` stub. The stub intentionally does not run real premium orchestration yet; callers must first prove the guardrails and build an auditable controller around them.
+
 ## Important positioning
 
 - This repo is a **workflow/specification skill**, not an official Claude Code runtime or SDK.
@@ -164,9 +194,15 @@ It is useful when a task is too large, risky, or ambiguous for a single model to
 SKILL.md
 agents/
   openai.yaml
+scripts/
+  ultrawork.mjs
+  ultrawork.selftest.mjs
+  example-flow.mjs
 ```
 
 - `SKILL.md`: the main skill spec
+- `scripts/ultrawork.mjs`: portable reference orchestrator and policy helpers
+- `scripts/ultrawork.selftest.mjs`: quick public-safe regression checks
 - `agents/openai.yaml`: agent-facing metadata and invocation policy
 
 ## Good fit

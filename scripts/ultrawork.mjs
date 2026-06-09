@@ -58,7 +58,7 @@ let BUDGET_USD = process.env.UW_BUDGET_USD ? Number(process.env.UW_BUDGET_USD) :
 
 // Rough $/1M tokens (blended in/out) — used only for budget signalling, not billing.
 // Tune freely; economy tiers are ~free relative to premium.
-const COST_PER_MTOK = {
+export const COST_PER_MTOK = {
   "minimax-m3": 0.3,
   "gpt-5.4-mini": 0.4,
   "grok-build": 2,
@@ -67,20 +67,31 @@ const COST_PER_MTOK = {
   "claude-opus-4-8": 20,
   "claude-opus-4-8[1m]": 20,
   "opus-4-8": 20,
+  "fable-5": 50,
+  "claude-fable-5": 50,
   "gpt-5.5": 12,
 };
 const DEFAULT_COST = 3;
 
-// Tier -> backend:model. Override any tier via env UW_TIER_ECONOMY="claude:haiku" etc.
-const TIERS = {
+// Tier -> backend:model. Override any tier via env UW_TIER_ECONOMY="claude:haiku" or UW_TIER_T0_PREMIUM="gateway:fable-5".
+export const TIERS = {
   economy: { backend: "gateway", model: "minimax-m3" },
   fast: { backend: "codex", model: "gpt-5.4-mini" },
   standard: { backend: "gateway", model: "grok-build" },
   heavy: { backend: "claude", model: "claude-opus-4-8[1m]" },
   judge: { backend: "gateway", model: "opus-4-8" },
+  premium: { backend: "gateway", model: "fable-5" },
+  copilot: { backend: "codex", model: "gpt-5.5" },
+  "T0-premium": { backend: "gateway", model: "fable-5" },
+  "T1-copilot": { backend: "codex", model: "gpt-5.5" },
+  "T2-judge": { backend: "gateway", model: "opus-4-8" },
+  "T3-scout": { backend: "gateway", model: "minimax-m3" },
 };
+function tierEnvName(name) {
+  return `UW_TIER_${String(name).toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+}
 for (const name of Object.keys(TIERS)) {
-  const ov = process.env[`UW_TIER_${name.toUpperCase()}`];
+  const ov = process.env[tierEnvName(name)] || process.env[`UW_TIER_${name.toUpperCase()}`];
   if (ov && ov.includes(":")) {
     const [backend, ...rest] = ov.split(":");
     TIERS[name] = { backend, model: rest.join(":") };
@@ -92,6 +103,31 @@ for (const name of Object.keys(TIERS)) {
 // deliberately advisory: callers still decide scope, budget, and whether the
 // current task is too small to justify ultrawork at all.
 export const TASK_PROFILES = Object.freeze({
+  "mission-critical-max": {
+    id: "mission-critical-max",
+    aliases: ["mission-critical-max", "mission critical", "ultrawork:max", "fable5", "fable-5"],
+    level: "XL",
+    primary: "fable-5",
+    economy: ["minimax-m3", "grok-build", "haiku-4-6"],
+    heavy: ["fable-5", "gpt-5.5", "opus-4-8"],
+    maxAgents: 48,
+    companionSkills: [],
+    requiresPremiumAuth: true,
+    budgetFloorPct: 15,
+    stopConditions: [
+      "literal opt-in keyword ultrawork:max is present",
+      "hard budget ceiling and budget floor are declared",
+      "refute-biased judge gate approves before side effects",
+      "two dry rounds or two judge refutations stop the run",
+      "any executor-boundary or redaction violation halts the run",
+    ],
+    verification: [
+      "Fable5 candidate plan/synthesis",
+      "GPT-5.5 copilot critique",
+      "Opus 4.8 refute-biased judge gate",
+      "Codex-grounded diff/test/runtime evidence before execution",
+    ],
+  },
   ui: {
     id: "ui",
     aliases: ["ui", "frontend", "design", "style", "moodboard", "component"],
@@ -174,7 +210,15 @@ for (const p of Object.values(TASK_PROFILES)) {
 
 export function profile(name = "env") {
   const key = PROFILE_ALIAS.get(String(name).toLowerCase()) || "env";
-  return { ...TASK_PROFILES[key], aliases: [...TASK_PROFILES[key].aliases], economy: [...TASK_PROFILES[key].economy], heavy: [...TASK_PROFILES[key].heavy], companionSkills: [...TASK_PROFILES[key].companionSkills], stopConditions: [...TASK_PROFILES[key].stopConditions], verification: [...TASK_PROFILES[key].verification] };
+  return {
+    ...TASK_PROFILES[key],
+    aliases: [...TASK_PROFILES[key].aliases],
+    economy: [...TASK_PROFILES[key].economy],
+    heavy: [...TASK_PROFILES[key].heavy],
+    companionSkills: [...TASK_PROFILES[key].companionSkills],
+    stopConditions: [...TASK_PROFILES[key].stopConditions],
+    verification: [...TASK_PROFILES[key].verification],
+  };
 }
 
 export function profileForTask(task = "") {
@@ -182,7 +226,7 @@ export function profileForTask(task = "") {
   const lower = text.toLowerCase();
   // Prefer higher-risk/specialized profiles when generic words like "review" or
   // "diff" co-occur with security or migration terms.
-  const priority = ["security", "migration", "env", "ui", "memory", "review"];
+  const priority = ["mission-critical-max", "security", "migration", "env", "ui", "memory", "review"];
   for (const id of priority) {
     const p = TASK_PROFILES[id];
     if (p.aliases.some((a) => lower.includes(String(a).toLowerCase()))) return profile(p.id);
@@ -207,6 +251,83 @@ export function companionSkillsFor(opts = {}) {
     add("superpowers:writing-skills", "skill authoring or process-doc improvement", "route-to-plugin-skill");
   }
   return [...found.values()];
+}
+
+export class PremiumAuthError extends Error {
+  constructor(message = "Premium tier requires explicit mission-critical authorization.") {
+    super(message);
+    this.name = "PremiumAuthError";
+  }
+}
+
+export class BudgetExceeded extends Error {
+  constructor(message = "Budget floor reached.") {
+    super(message);
+    this.name = "BudgetExceeded";
+  }
+}
+
+export class ExecutorBoundaryError extends Error {
+  constructor(message = "Only the Codex executor may perform side effects.") {
+    super(message);
+    this.name = "ExecutorBoundaryError";
+  }
+}
+
+export function requirePremiumAuth(ctx = {}) {
+  const ok = ctx.mission_critical === true
+    && ctx.authorized === true
+    && ctx.optInKeyword === "ultrawork:max"
+    && typeof ctx.budget === "number"
+    && ctx.budget > 0;
+  if (!ok) throw new PremiumAuthError();
+  return true;
+}
+
+export function resolveTier(taskMeta = {}) {
+  if (taskMeta.requestedTier === "T0-premium" || taskMeta.requestedTier === "premium") {
+    requirePremiumAuth(taskMeta);
+    return "T0-premium";
+  }
+  if (taskMeta.risk === "high" || taskMeta.needsJudge) return "T2-judge";
+  if (taskMeta.needsCopilot) return "T1-copilot";
+  return "T3-scout";
+}
+
+export function budgetGuard(budget, { floorPct = 15 } = {}) {
+  if (!budget || typeof budget.limit !== "number") throw new TypeError("budget.limit is required.");
+  const floor = budget.limit * (floorPct / 100);
+  return {
+    assertCanContinue() {
+      const remaining = budget.limit - (budget.spent ?? 0);
+      if (remaining <= floor) {
+        throw new BudgetExceeded(`Budget floor reached: remaining=${remaining}, floor=${floor}`);
+      }
+      return { remaining, floor, floorPct };
+    },
+  };
+}
+
+export function executorOnly(step = {}) {
+  const sideEffect = step.writes === true
+    || step.shell === true
+    || step.deploy === true
+    || step.destructive === true
+    || step.sideEffect === true;
+  if (sideEffect && step.executor !== "codex") throw new ExecutorBoundaryError();
+  return true;
+}
+
+export function redactPublic(value) {
+  return String(value)
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
+    .replace(/(?:sk|pk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_=-]{12,}/g, "[redacted-token]")
+    .replace(/(?:\/Users|\/Volumes|\/home)\/[^\s"'`]+/g, "[redacted-path]")
+    .replace(/[A-Fa-f0-9]{32,}/g, "[redacted-id]");
+}
+
+export function runMissionCriticalMax() {
+  throw new Error("mission-critical-max orchestration is not implemented; this public helper currently provides guardrails only.");
 }
 
 export function shouldUseUltrawork(opts = {}) {
@@ -238,6 +359,8 @@ export function budgetPlan(name = "env", opts = {}) {
     economy: p.economy,
     heavy: p.heavy,
     economyLane: minimaxPlanConfirmed ? "bulk" : "metered-or-unconfirmed",
+    premiumAuthRequired: Boolean(p.requiresPremiumAuth),
+    budgetFloorPct: p.budgetFloorPct || 0,
     maxAgents,
     maxRounds: Number(opts.maxRounds || (scale === "XL" ? 3 : scale === "L" ? 2 : 1)),
     maxOutputTokensPerAgent: Number(opts.maxOutputTokensPerAgent || 1200),
