@@ -41,10 +41,12 @@ import {
 
 assert.equal(config.TIERS.premium.model, "fable-5");
 assert.equal(config.TIERS["T0-premium"].model, "fable-5");
-assert.equal(config.TIERS.copilot.model, "chatgpt-pro-consult");
-assert.equal(config.TIERS["T1-copilot"].model, "chatgpt-pro-consult");
-assert.equal(config.TIERS["chatgpt-pro-consult"].model, "chatgpt-pro-consult");
+assert.equal(config.TIERS.copilot.model, "gpt-5.5");
+assert.equal(config.TIERS["T1-copilot"].model, "gpt-5.5");
+assert.equal(config.TIERS["chatgpt-pro-consult"].model, "gpt-5.5");
 assert.equal(config.COST_PER_MTOK["chatgpt-pro-consult"], 12);
+assert.equal(config.PRO_FAST_CONSULT_TIER, "consultant");
+assert.equal(config.TIERS[config.PRO_FAST_CONSULT_TIER].model, "gpt-5.5");
 assert(config.MAX_CHILD_OUTPUT_BYTES > 0);
 assert.throws(() => setBudget("not-a-number"), TypeError);
 assert.equal(profileForTask("ultrawork:max mission critical gateway migration").id, "mission-critical-max");
@@ -54,14 +56,16 @@ assert.equal(profileForTask("trading strategy backtest with Hermes").id, "tradin
 assert.equal(profileForTask("edit an existing skill and improve docs").id, "memory");
 assert.equal(profileForTask("academic source-grounded code review and paper-style evidence audit").id, "academic");
 const academicPlan = budgetPlan("academic", { minimaxPlanConfirmed: true, maxRounds: 2 });
-assert.equal(academicPlan.primary, "chatgpt-pro-consult");
+assert.equal(academicPlan.primary, "gpt-5.5");
+assert(academicPlan.researchOffload.includes("chatgpt_pro_research_mcp"));
+assert(academicPlan.subscriptionLanes.some((lane) => lane.executor === "chatgpt-pro-mcp-web-adapter"));
 assert(academicPlan.verification.some((v) => /claim.*evidence|citation|rebuttal/i.test(v)));
 assert.equal(academicPlan.maxOutputTokensPerAgent <= 1200, true);
 const acPacket = academicContinuityPacket({
   planId: "pro-academic-smoke",
   question: "Does the ChatGPT Pro lane preserve enough context for code-health review?",
   constraints: ["Codex executes side effects only", "No local secrets in public packet"],
-  claims: [{ id: "c1", text: "chatgpt-pro-consult rewrites only the model field", evidence: ["runtime/server.js:gptPassthroughBodyText"], status: "observed" }],
+  claims: [{ id: "c1", text: "gpt-5.5 is the fast consult lane; chatgpt-pro-consult is only a hidden compatibility alias", evidence: ["runtime/server.js:gptPassthroughBodyText"], status: "observed" }],
   decisions: ["Use explicit continuity packet for open-ultrawork isolated agents"],
   openQuestions: ["Should advisory mode strip tool schemas?"],
   verificationCommands: ["npm test --prefix runtime"],
@@ -79,8 +83,11 @@ assert.match(acPrompt, /claim.*evidence/i);
 assert.match(acPrompt, /unsupported|rebuttal/i);
 assert.equal(ACADEMIC_REVIEW_SCHEMA.verdict, "string");
 const acWorkflow = academicCollaborationPlan({ task: "high risk architecture review", packet: acPacket });
-assert.equal(acWorkflow.primaryTier, "chatgpt-pro-consult");
+assert.equal(acWorkflow.primaryTier, "consultant");
+assert.equal(acWorkflow.primaryModel, "gpt-5.5");
+assert.equal(acWorkflow.researchLane, "chatgpt_pro_research_mcp");
 assert(acWorkflow.steps.some((step) => /claim ledger/i.test(step)));
+assert(acWorkflow.steps.some((step) => /submit_deep_research|fetch_deep_research_result/i.test(step)));
 const hypothesisPacket = academicContinuityPacket({
   planId: "hypothesis-smoke",
   question: "Is an unsupported claim prevented from promotion?",
@@ -135,7 +142,7 @@ assert.equal(unconfirmedPlan.economyLane, "metered-or-unconfirmed");
 assert(unconfirmedPlan.maxAgents <= 4);
 
 const uiPlan = budgetPlan("ui", { minimaxPlanConfirmed: true });
-assert.equal(uiPlan.primary, "chatgpt-pro-consult");
+assert.equal(uiPlan.primary, "gpt-5.5");
 assert.equal(uiPlan.economyLane, "bulk");
 assert(uiPlan.maxAgents >= 8);
 assert(uiPlan.stopConditions.length > 0);
@@ -144,17 +151,18 @@ const tradingPlan = budgetPlan("trading", { minimaxPlanConfirmed: true, maxRound
 assert.equal(tradingPlan.profile, "trading");
 assert(tradingPlan.maxAgents <= 24);
 assert(tradingPlan.verification.some((v) => /Time Room|Hermes/.test(v)));
-assert(tradingPlan.researchOffload.includes("chatgpt_pro_deep_research"));
-assert(tradingPlan.subscriptionLanes.some((lane) => lane.id === "chatgpt_pro_deep_research"));
-assert(tradingPlan.apiFanoutExcludes.includes("chatgpt_pro_deep_research"));
+assert(tradingPlan.researchOffload.includes("chatgpt_pro_research_mcp"));
+assert(tradingPlan.subscriptionLanes.some((lane) => lane.id === "chatgpt_pro_research_mcp"));
+assert(tradingPlan.apiFanoutExcludes.includes("chatgpt_pro_research_mcp"));
 assert.equal(tradingPlan.subscriptionLanes[0].hotPath, false);
 assert.equal(tradingPlan.subscriptionLanes[0].apiFanout, false);
-assert(tradingPlan.subscriptionLanes[0].forbidden.some((item) => /live order|leverage|secrets|API keys/i.test(item)));
+assert(tradingPlan.subscriptionLanes[0].forbidden.some((item) => /live order|leverage|secrets|API keys|raw browser/i.test(item)));
 
 const deepResearch = deepResearchPlanForTask("Hermes AI 自動化交易 orderbook funding on-chain pump detection 套利");
 assert.equal(deepResearch.use, true);
 assert.equal(deepResearch.countsAsApiFanout, false);
-assert.equal(deepResearch.lane.id, "chatgpt_pro_deep_research");
+assert.equal(deepResearch.lane.id, "chatgpt_pro_research_mcp");
+assert.equal(deepResearch.lane.executor, "chatgpt-pro-mcp-web-adapter");
 assert(deepResearch.promptPackages.some((pkg) => pkg.id === "market-microstructure-sources"));
 assert(deepResearch.promptPackages.some((pkg) => pkg.id === "bybit-portfolio-margin-arbitrage"));
 assert.match(deepResearch.importRule, /Codex must verify primary sources/);
@@ -230,7 +238,7 @@ assert.equal(taskPacket.executor_host, "codex-app");
 assert.equal(validateSubagentTaskPacket(taskPacket).ok, true);
 const badAuthorityPacket = subagentTaskPacket({
   objective: "A non-executor model must not claim sandbox execution authority.",
-  authorModel: "chatgpt-pro-consult",
+  authorModel: "chatgpt-pro-web",
   executorHost: "codex-app",
   authorityMode: AUTHORITY_MODES.SANDBOX_EXECUTOR,
   allowedRoots: ["runtime/server.js"],
@@ -270,14 +278,38 @@ const sandboxDescriptorCheck = validateSubagentTaskPacket(sandboxDescriptorPacke
 assert.equal(sandboxDescriptorCheck.ok, true);
 assert(sandboxDescriptorCheck.warnings.some((warning) => /not yet spawnable|descriptor/i.test(warning)));
 const proJob = proResearchJob({
-  question: "What primary-source evidence is required before claiming chatgpt-pro-consult equals Deep Research?",
+  question: "What primary-source evidence is required before claiming chatgpt-pro-mcp produced confirmed Deep Research?",
   constraints: ["Do not include secrets", "Prefer official docs"],
   sourceRequirements: ["OpenAI help/docs", "primary sources only"],
   expectedClaims: ["Deep Research is asynchronous and sourced"],
 });
 assert.equal(proJob.kind, "ProResearchJobV1");
 assert.equal(proJob.sync_responses_model, false);
+assert.equal(proJob.executor, "chatgpt-pro-mcp-web-adapter");
+assert.equal(proJob.authority.author_model, "chatgpt-pro-web");
+assert.equal(proJob.deep_research_confirmed, false);
+assert.equal(proJob.submit_tool, "submit_deep_research");
+assert.equal(proJob.fetch_tool, "fetch_deep_research_result");
 assert.match(proJob.prompt, /Deep Research/i);
+const mcpImportedReport = importProResearchReport({
+  job: proJob,
+  taskId: "job_public_safe_001",
+  taskStatus: "completed",
+  deepResearchConfirmed: false,
+  researchMode: { enabled: false, observation: "research mode button not confirmed" },
+  reportText: "Claim: The async lane can return sourced memos for Codex verification.",
+  sourceLinks: [
+    "https://help.openai.com/en/articles/10500283-deep-research",
+    "https://chatgpt.com/c/private-thread-id",
+  ],
+  claims: [
+    { id: "c0", text: "MCP task metadata can replace a human-run timestamp for provenance.", evidence: ["https://help.openai.com/en/articles/10500283-deep-research"] },
+  ],
+});
+assert.equal(mcpImportedReport.provenance_ok, true);
+assert.equal(mcpImportedReport.deep_research_confirmed, false);
+assert.equal(mcpImportedReport.mcp_task_id, "job_public_safe_001");
+assert(!mcpImportedReport.source_links.some((link) => /chatgpt\.com\/c\//.test(link)));
 const importedReport = importProResearchReport({
   job: proJob,
   researchRanAt: "2026-06-18T00:00:00Z",

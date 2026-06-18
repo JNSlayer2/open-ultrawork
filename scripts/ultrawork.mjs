@@ -9,8 +9,8 @@
 //   2. VENDOR-DIVERSE VERIFICATION — adversarial checks use genuinely different
 //      models (Claude + GPT + Grok + MiniMax), catching failure modes that N
 //      identical skeptics share.
-//   3. SUBSCRIPTION RESEARCH OFFLOAD — ChatGPT Pro Deep Research can be used by
-//      the human as a quota-separated research lane. It returns sourced reports
+//   3. SUBSCRIPTION RESEARCH OFFLOAD — ChatGPT Pro research runs through a
+//      guarded async chatgpt-pro-mcp UI bridge. It can return sourced reports
 //      for Codex to verify/structure, never live execution authority.
 //
 // Each agent() = one subprocess / HTTP call with a FRESH context (no shared
@@ -62,7 +62,7 @@ function codexHomeHasModelGateway(homeDir) {
 
 // Prefer a dedicated SSD sub-home only when it is configured for model_gateway.
 // A bare ~/.codex-sub with just auth.json makes codex exec fall back to provider=openai,
-// where gateway slugs like chatgpt-pro-consult are rejected. Falls back to ~/.codex.
+// where gateway slugs can be rejected. Falls back to ~/.codex.
 const CODEX_HOME = process.env.UW_CODEX_HOME
   || (fs.existsSync(SUB_CODEX_HOME) && codexHomeHasModelGateway(SUB_CODEX_HOME) ? SUB_CODEX_HOME : MAIN_CODEX_HOME);
 const GATEWAY_URL = (process.env.UW_GATEWAY_URL || "http://127.0.0.1:4177").replace(/\/+$/, "");
@@ -93,9 +93,10 @@ export const COST_PER_MTOK = {
   "fable-5": 50,
   "claude-fable-5": 50,
   "gpt-5.5": 12,
-  "chatgpt-pro-consult": 12,
+  "chatgpt-pro-consult": 12, // hidden/deprecated compatibility alias for gpt-5.5
 };
 const DEFAULT_COST = 3;
+export const PRO_FAST_CONSULT_TIER = "consultant";
 
 // Tier -> backend:model. Override any tier via env UW_TIER_ECONOMY="claude:haiku" etc.
 export const TIERS = {
@@ -105,11 +106,11 @@ export const TIERS = {
   heavy: { backend: "claude", model: "claude-opus-4-8[1m]" },
   judge: { backend: "gateway", model: "opus-4-8" },
   premium: { backend: "gateway", model: "fable-5" },
-  consultant: { backend: "codex", model: "chatgpt-pro-consult" },
-  "chatgpt-pro-consult": { backend: "codex", model: "chatgpt-pro-consult" },
-  copilot: { backend: "codex", model: "chatgpt-pro-consult" },
+  consultant: { backend: "codex", model: "gpt-5.5" },
+  "chatgpt-pro-consult": { backend: "codex", model: "gpt-5.5" },
+  copilot: { backend: "codex", model: "gpt-5.5" },
   "T0-premium": { backend: "gateway", model: "fable-5" },
-  "T1-copilot": { backend: "codex", model: "chatgpt-pro-consult" },
+  "T1-copilot": { backend: "codex", model: "gpt-5.5" },
   "T2-judge": { backend: "gateway", model: "opus-4-8" },
   "T3-scout": { backend: "gateway", model: "minimax-m3" },
 };
@@ -126,27 +127,35 @@ for (const name of Object.keys(TIERS)) {
 
 
 export const DEEP_RESEARCH_LANE = Object.freeze({
-  id: "chatgpt_pro_deep_research",
+  id: "chatgpt_pro_research_mcp",
   quotaType: "chatgpt_pro_subscription",
   apiFanout: false,
   hotPath: false,
-  executor: "human_in_chatgpt_pro",
-  role: "subscription research offload for sourced reports",
+  executor: "chatgpt-pro-mcp-web-adapter",
+  role: "guarded async ChatGPT Pro UI bridge for sourced research reports",
+  submitTool: "submit_deep_research",
+  fetchTool: "fetch_deep_research_result",
   workflow: [
-    "Codex drafts a bounded research prompt and source requirements",
-    "Human runs Deep Research in ChatGPT Pro and exports Markdown/PDF/source links",
-    "Codex cross-checks primary sources and converts findings into hashed artifacts",
+    "Codex drafts a bounded ProResearchJobV1 prompt and source requirements",
+    "chatgpt-pro-mcp calls submit_deep_research and returns running or completed",
+    "A subagent waits with fetch_deep_research_result, then imports Markdown/source links/claim ledger",
+    "Codex cross-checks primary sources and converts only supported claims into hashed artifacts",
   ],
   forbidden: [
     "secrets or API keys",
     "exchange write permissions",
     "live order placement",
     "leverage, stop-loss, or position-size mutation",
-    "automated UI abuse or unattended ChatGPT browsing",
+    "raw browser tool exposure",
+    "auto-login, payment, terms, settings, history, cookies, profiles, or session export",
   ],
   importContract: [
     "original_prompt",
-    "research_ran_at",
+    "research_ran_at or mcp_task_id",
+    "mcp_task_id",
+    "task_status",
+    "deep_research_confirmed",
+    "research_mode",
     "report_text_or_file",
     "source_links",
     "limitations",
@@ -198,19 +207,20 @@ export const TASK_PROFILES = Object.freeze({
     level: "XL",
     primary: "fable-5",
     economy: ["minimax-m3", "grok-build", "haiku-4-6"],
-    heavy: ["fable-5", "chatgpt-pro-consult", "opus-4-8"],
+    heavy: ["fable-5", "gpt-5.5", "opus-4-8"],
+    researchOffload: [DEEP_RESEARCH_LANE.id],
     maxAgents: 48,
     companionSkills: [],
     requiresPremiumAuth: true,
     budgetFloorPct: 15,
     stopConditions: ["literal opt-in keyword ultrawork:max is present", "hard budget ceiling and budget floor are declared", "refute-biased judge gate approves before side effects", "two dry rounds or two judge refutations stop the run", "any executor-boundary or redaction violation halts the run"],
-    verification: ["Fable5 candidate plan/synthesis", "ChatGPT Pro Consult copilot critique", "Opus 4.8 refute-biased judge gate", "Codex-grounded diff/test/runtime evidence before execution"],
+    verification: ["Fable5 candidate plan/synthesis", "GPT-5.5 fast consult critique", "ChatGPT Pro MCP sourced research when external evidence is needed", "Opus 4.8 refute-biased judge gate", "Codex-grounded diff/test/runtime evidence before execution"],
   },
   ui: {
     id: "ui",
     aliases: ["ui", "frontend", "design", "style", "moodboard", "component"],
     level: "L",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3"],
     heavy: ["opus-4-8"],
     maxAgents: 24,
@@ -222,7 +232,7 @@ export const TASK_PROFILES = Object.freeze({
     id: "review",
     aliases: ["review", "pr", "code review", "diff", "lint", "test"],
     level: "M",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3"],
     heavy: ["opus-4-8"],
     maxAgents: 12,
@@ -234,9 +244,10 @@ export const TASK_PROFILES = Object.freeze({
     id: "academic",
     aliases: ["academic", "research", "paper", "literature", "source", "citation", "claim", "evidence", "學術", "研究", "論文", "來源", "證據"],
     level: "M",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3", "grok-build"],
     heavy: ["opus-4-8"],
+    researchOffload: [DEEP_RESEARCH_LANE.id],
     maxAgents: 12,
     companionSkills: [],
     stopConditions: ["claim ledger has source/evidence status for every important assertion", "unsupported claims are demoted to hypotheses", "rebuttal pass produces no unaddressed P0/P1 objections"],
@@ -246,7 +257,7 @@ export const TASK_PROFILES = Object.freeze({
     id: "env",
     aliases: ["env", "environment", "gateway", "openclaw", "setup", "install", "runtime", "launchagent"],
     level: "M",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3"],
     heavy: ["opus-4-8"],
     maxAgents: 16,
@@ -258,7 +269,7 @@ export const TASK_PROFILES = Object.freeze({
     id: "security",
     aliases: ["security", "auth", "secret", "vulnerability", "attack", "threat", "permission"],
     level: "L",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3", "grok-build"],
     heavy: ["opus-4-8"],
     maxAgents: 32,
@@ -270,14 +281,14 @@ export const TASK_PROFILES = Object.freeze({
     id: "trading",
     aliases: ["trading", "trade", "backtest", "strategy", "hermes", "time-room", "router", "portfolio", "交易", "回測", "策略", "風控", "情境權重", "精神時光屋"],
     level: "L",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3"],
     heavy: ["opus-4-8", "claude-opus-4-8[1m]"],
-    researchOffload: ["chatgpt_pro_deep_research"],
+    researchOffload: [DEEP_RESEARCH_LANE.id],
     maxAgents: 24,
     companionSkills: ["trading-training"],
     stopConditions: [
-      "ChatGPT Pro Deep Research reports imported with prompt/source/provenance when external research is used",
+      "ChatGPT Pro MCP research reports imported with task/source/provenance when external research is used",
       "boundary/gate/data split recorded before exploration",
       "candidate pool pruned to top-N before expensive review",
       "no-go reasons and failed experiments preserved",
@@ -292,7 +303,7 @@ export const TASK_PROFILES = Object.freeze({
     id: "migration",
     aliases: ["migration", "refactor", "architecture", "large", "multi-file", "rewrite"],
     level: "L",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3"],
     heavy: ["opus-4-8", "claude-opus-4-8[1m]"],
     maxAgents: 32,
@@ -304,7 +315,7 @@ export const TASK_PROFILES = Object.freeze({
     id: "memory",
     aliases: ["memory", "skill", "skills", "gbrain", "distill", "documentation", "superpowers"],
     level: "M",
-    primary: "chatgpt-pro-consult",
+    primary: "gpt-5.5",
     economy: ["minimax-m3"],
     heavy: ["opus-4-8"],
     maxAgents: 8,
@@ -483,8 +494,9 @@ export function proAcademicPrompt(packetOrInput = {}, opts = {}) {
   const mode = opts.mode || "code-and-research-health-review";
   return [
     "PRO_ACADEMIC_REVIEW",
-    "Role: ChatGPT Pro Consult acts as a rigorous academic collaborator and code-health reviewer.",
+    "Role: GPT-5.5 fast consult or ChatGPT Pro MCP research lane acts as a rigorous academic collaborator and code-health reviewer.",
     "Boundary: advisory only; do not claim tool execution, file writes, shell, deployment, or live account access.",
+    "Lane semantics: gpt-5.5 is fast critique; chatgpt-pro-mcp is async source-backed research. Do not claim confirmed Deep Research unless the supplied result explicitly says deep_research_confirmed=true.",
     "Method: separate claims from evidence; mark unsupported claims; claims without evidence are hypotheses, not conclusions; search for rebuttals and alternative hypotheses; propose deterministic Codex verification steps.",
     `Mode: ${mode}`,
     "Return a compact JSON object matching the supplied schema. No prose outside JSON.",
@@ -501,14 +513,17 @@ export function academicCollaborationPlan(opts = {}) {
   return {
     profile: p.id,
     level: p.level,
-    primaryTier: "chatgpt-pro-consult",
+    primaryTier: PRO_FAST_CONSULT_TIER,
+    primaryModel: TIERS[PRO_FAST_CONSULT_TIER].model,
+    researchLane: DEEP_RESEARCH_LANE.id,
     economyTiers: [...p.economy],
     judgeTier: "opus-4-8",
     packetRequired: true,
     packetHash: packet?.content_hash || null,
     steps: [
       "Codex builds an AcademicContinuityPacketV1 with claim ledger, constraints, verification commands, verification receipts, and artifact refs",
-      "ChatGPT Pro Consult performs claim-evidence review, rebuttal search, and alternative-hypothesis generation",
+      "GPT-5.5 performs fast claim-evidence critique when a synchronous Codex-native review is enough",
+      "For source-backed Pro research, chatgpt-pro-mcp runs submit_deep_research and a waiting subagent fetches with fetch_deep_research_result",
       "Economy subagents may fan out only on narrow extraction/refutation tasks with schema-limited outputs",
       "Opus/judge reviews unresolved high-risk objections when Pro and evidence disagree",
       "Codex promotes only supported claims into code, docs, tests, or runtime artifacts and records verification evidence",
@@ -520,7 +535,7 @@ export function academicCollaborationPlan(opts = {}) {
 export async function proAcademicReview(input = {}, opts = {}) {
   const packet = input.kind === "AcademicContinuityPacketV1" ? input : academicContinuityPacket(input);
   return agent(proAcademicPrompt(packet, opts), {
-    tier: opts.tier || "chatgpt-pro-consult",
+    tier: opts.tier || PRO_FAST_CONSULT_TIER,
     label: opts.label || "pro-academic-review",
     schema: opts.schema || ACADEMIC_REVIEW_SCHEMA,
     retries: opts.retries ?? 0,
@@ -748,13 +763,15 @@ export function proResearchJob(input = {}) {
   const constraints = (input.constraints || []).map((v) => cleanPublic(v, 500));
   const sourceRequirements = (input.sourceRequirements || input.source_requirements || []).map((v) => cleanPublic(v, 500));
   const expectedClaims = (input.expectedClaims || input.expected_claims || []).map((v) => cleanPublic(v, 500));
+  const requireDeepResearch = Boolean(input.requireDeepResearch || input.require_deep_research);
   const prompt = [
-    "CHATGPT_PRO_DEEP_RESEARCH_JOB",
+    "CHATGPT_PRO_RESEARCH_MCP_JOB",
     "",
     `Question: ${question}`,
     constraints.length ? `Constraints:\n- ${constraints.join("\n- ")}` : "Constraints:\n- Do not include secrets or private local state.",
     sourceRequirements.length ? `Source requirements:\n- ${sourceRequirements.join("\n- ")}` : "Source requirements:\n- Prefer primary sources and cite every factual claim.",
     expectedClaims.length ? `Expected claim ledger seeds:\n- ${expectedClaims.join("\n- ")}` : "Expected output: claim/evidence/status/rebuttal/next_test ledger.",
+    requireDeepResearch ? "Mode requirement: fail closed unless ChatGPT confirms Deep Research/research-mode is active." : "Mode note: a sourced ChatGPT Pro Web research memo is acceptable if Deep Research cannot be confirmed; mark deep_research_confirmed=false.",
     "",
     "Return a sourced report with source links, limitations, and claims that Codex can verify before promotion.",
   ].join("\n");
@@ -764,6 +781,19 @@ export function proResearchJob(input = {}) {
     lane: DEEP_RESEARCH_LANE.id,
     sync_responses_model: false,
     executor: DEEP_RESEARCH_LANE.executor,
+    submit_tool: DEEP_RESEARCH_LANE.submitTool,
+    fetch_tool: DEEP_RESEARCH_LANE.fetchTool,
+    require_deep_research: requireDeepResearch,
+    deep_research_confirmed: false,
+    authority: {
+      author_model: "chatgpt-pro-web",
+      decision_model: "chatgpt-pro-web",
+      executor_host: DEEP_RESEARCH_LANE.executor,
+      authority_mode: "research_ui_bridge",
+      patch_proposal: false,
+      direct_write: false,
+      direct_shell: false,
+    },
     question,
     constraints,
     source_requirements: sourceRequirements,
@@ -774,16 +804,75 @@ export function proResearchJob(input = {}) {
   return job;
 }
 
-export function importProResearchReport({ job, reportText = "", sourceLinks = [], claims = [], limitations = [], researchRanAt = "", research_ran_at = "" } = {}) {
+function sourceLinkIsPublicEvidence(link = "") {
+  try {
+    const url = new URL(String(link));
+    const host = url.hostname.toLowerCase();
+    if (host === "chatgpt.com" || host.endsWith(".chatgpt.com")) return false;
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeResearchMode(value = {}) {
+  if (!value || typeof value !== "object") return { enabled: false };
+  return redactStructured({
+    enabled: Boolean(value.enabled),
+    observation: value.observation || value.status || "",
+    deep_research_confirmed: Boolean(value.deep_research_confirmed || value.deepResearchConfirmed),
+  });
+}
+
+export function importProResearchReport({
+  job,
+  reportText = "",
+  sourceLinks = [],
+  claims = [],
+  limitations = [],
+  researchRanAt = "",
+  research_ran_at = "",
+  taskId = "",
+  task_id = "",
+  mcpTaskId = "",
+  mcp_task_id = "",
+  taskStatus = "",
+  task_status = "",
+  status = "",
+  submittedAt = "",
+  submitted_at = "",
+  completedAt = "",
+  completed_at = "",
+  deepResearchConfirmed = undefined,
+  deep_research_confirmed = undefined,
+  researchMode = undefined,
+  research_mode = undefined,
+} = {}) {
   if (!job || job.kind !== "ProResearchJobV1") throw new TypeError("ProResearchJobV1 job is required.");
-  const safeSourceLinks = sourceLinks.map((v) => cleanPublic(v, 500));
-  const ranAt = cleanPublic(researchRanAt || research_ran_at, 80);
+  const safeSourceLinks = [...new Set(sourceLinks.map((v) => cleanPublic(v, 500)).filter(sourceLinkIsPublicEvidence))];
+  const mcpId = cleanPublic(taskId || task_id || mcpTaskId || mcp_task_id, 160);
+  const mcpStatus = cleanPublic(taskStatus || task_status || status, 80);
+  const submitted = cleanPublic(submittedAt || submitted_at, 80);
+  const completed = cleanPublic(completedAt || completed_at, 80);
+  const ranAt = cleanPublic(researchRanAt || research_ran_at || completed || submitted, 80);
+  const mode = normalizeResearchMode(researchMode || research_mode || {});
+  const confirmed = Boolean(
+    deepResearchConfirmed === true ||
+    deep_research_confirmed === true ||
+    mode.deep_research_confirmed === true,
+  );
   const provenanceErrors = [];
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(ranAt)) {
-    provenanceErrors.push("research_ran_at must be a non-empty ISO timestamp from the human-run ChatGPT Pro Deep Research session");
+  if (!mcpId && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(ranAt)) {
+    provenanceErrors.push("research_ran_at or mcp_task_id must identify the Pro Research run");
+  }
+  if (mcpId && /failed|cancelled|canceled|error/i.test(mcpStatus)) {
+    provenanceErrors.push(`mcp task status is not promotable: ${mcpStatus}`);
+  }
+  if (job.require_deep_research === true && confirmed !== true) {
+    provenanceErrors.push("deep_research_confirmed is required by this job but was not true");
   }
   if (safeSourceLinks.length === 0) {
-    provenanceErrors.push("source_links must include at least one report/source URL before promotion");
+    provenanceErrors.push("source_links must include at least one public report/source URL before promotion");
   }
   const normalizedClaims = claims.map((claim, index) => ({
     id: cleanPublic(claim.id || `claim-${index + 1}`, 120),
@@ -803,7 +892,15 @@ export function importProResearchReport({ job, reportText = "", sourceLinks = []
     kind: "ProResearchImportArtifactV1",
     created_at: new Date().toISOString(),
     job_hash: job.content_hash,
-    research_ran_at: ranAt,
+    lane: job.lane || DEEP_RESEARCH_LANE.id,
+    executor: job.executor || DEEP_RESEARCH_LANE.executor,
+    mcp_task_id: mcpId || null,
+    task_status: mcpStatus || null,
+    submitted_at: submitted || null,
+    completed_at: completed || null,
+    research_ran_at: ranAt || null,
+    research_mode: mode,
+    deep_research_confirmed: confirmed,
     source_links: safeSourceLinks,
     limitations: limitations.map((v) => cleanPublic(v, 500)),
     report_hash: crypto.createHash("sha256").update(cleanPublic(reportText, 20000)).digest("hex"),
@@ -1347,4 +1444,4 @@ export async function pipeline(items, ...stages) {
   );
 }
 
-export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, MAX_CHILD_OUTPUT_BYTES, TIERS, COST_PER_MTOK, TASK_PROFILES, DEEP_RESEARCH_LANE, AUTHORITY_MODES, ACADEMIC_REVIEW_SCHEMA };
+export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, MAX_CHILD_OUTPUT_BYTES, TIERS, COST_PER_MTOK, TASK_PROFILES, DEEP_RESEARCH_LANE, AUTHORITY_MODES, ACADEMIC_REVIEW_SCHEMA, PRO_FAST_CONSULT_TIER };

@@ -38,7 +38,7 @@ The V4 contract separates **who authored the decision** from **who executed side
 
 This means an external model can be the real author of a patch proposal while Codex, OpenClaw, or another local host remains the executor. Patch proposals are intent only; side effects require an approved executor path and traceable receipts.
 
-`chatgpt-pro-consult` should be treated as a fast GPT-5.5 / Pro-account consult lane inside Codex-style workflows. It is **not** equivalent to ChatGPT App Deep Research. True ChatGPT Pro research uses an async `ProResearchJobV1`: create a bounded research packet, run Deep Research manually in ChatGPT Pro, import source links and claims, then pass `proResearchPromotionGate()` before promoting claims.
+Daily GPT collaboration should use `gpt-5.5` as the Codex-native fast consult lane. `chatgpt-pro-consult` is only a hidden/deprecated compatibility alias and must not be presented as a separate Pro-level dropdown model. True ChatGPT Pro research uses an async `ProResearchJobV1` through the guarded `chatgpt-pro-mcp` lane: Codex creates a bounded packet, `submit_deep_research` starts the UI research task, a waiting subagent calls `fetch_deep_research_result`, and Codex imports source links/claims through `proResearchPromotionGate()` before promoting anything. Manual ChatGPT Pro / Deep Research copy-paste remains a fallback only.
 
 ## 快速更新 / Quick update
 
