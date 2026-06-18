@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import {
   profileForTask,
   companionSkillsFor,
@@ -15,6 +17,18 @@ import {
   PremiumAuthError,
   BudgetExceeded,
   ExecutorBoundaryError,
+  AUTHORITY_MODES,
+  authorityProfileFor,
+  authorizeExecution,
+  subagentTaskPacket,
+  validateSubagentTaskPacket,
+  proResearchJob,
+  importProResearchReport,
+  proResearchPromotionGate,
+  ProResearchPromotionError,
+  backendCapabilityProfile,
+  authorityLabel,
+  costReportKey,
   resolveTier,
   requirePremiumAuth,
   budgetGuard,
@@ -156,15 +170,168 @@ assert.deepEqual(budgetGuard({ limit: 100, spent: 80 }).assertCanContinue(), { r
 assert.equal(executorOnly({ writes: false, executor: "fable-5" }), true);
 assert.throws(() => executorOnly({ writes: true, executor: "fable-5" }), ExecutorBoundaryError);
 assert.equal(executorOnly({ shell: true, executor: "codex" }), true);
+assert.equal(AUTHORITY_MODES.TOOL_INTENT_BRIDGE, "tool_intent_bridge");
+assert.equal(
+  costReportKey({
+    tier: "judge",
+    backend: "gateway",
+    model: "transport-wrapper",
+    author_model: "opus-4-8",
+    executor_host: "codex-app",
+    authority_mode: "tool_intent_bridge",
+  }),
+  "judge:opus-4-8",
+);
+assert.match(
+  authorityLabel({
+    model: "transport-wrapper",
+    author_model: "opus-4-8",
+    executor_host: "codex-app",
+    authority_mode: "tool_intent_bridge",
+  }),
+  /author=opus-4-8 executor=codex-app mode=tool_intent_bridge/,
+);
+const opusAuthority = authorityProfileFor({ backend: "gateway", model: "opus-4-8", surface: "codex-app" });
+assert.equal(opusAuthority.author_model, "opus-4-8");
+assert.equal(opusAuthority.decision_model, "opus-4-8");
+assert.equal(opusAuthority.executor_host, "codex-app");
+assert.equal(opusAuthority.authority_mode, "tool_intent_bridge");
+assert.equal(opusAuthority.patch_proposal, true);
+assert.equal(authorizeExecution({ writes: true, author_model: "opus-4-8", executor_host: "codex-app", authority_mode: "tool_intent_bridge" }), true);
+assert.throws(() => authorizeExecution({ writes: true, author_model: "opus-4-8", executor_host: "minimax-m3", authority_mode: "brain_only" }), ExecutorBoundaryError);
+assert.throws(() => authorizeExecution({ writes: true, author_model: "claude-opus-4-8[1m]", executor_host: "codex-app", authority_mode: "patch_proposal" }), ExecutorBoundaryError);
+const claudeBrain = backendCapabilityProfile({ backend: "claude", model: "claude-opus-4-8[1m]" });
+assert.equal(claudeBrain.native_dynamic_workflow, false);
+assert.equal(claudeBrain.backend_mode, "claude_print_json_tools_off");
+assert.equal(claudeBrain.authority_mode, "brain_only");
+const claudeAuthority = authorityProfileFor({ backend: "claude", model: "claude-opus-4-8[1m]" });
+assert.equal(claudeAuthority.author_model, "claude-opus-4-8[1m]");
+assert.equal(claudeAuthority.authority_mode, "patch_proposal");
+assert.throws(() => authorizeExecution({ writes: true, executor_host: "codex-cli", authority_mode: claudeAuthority.authority_mode }), ExecutorBoundaryError);
+const claudeSandboxDescriptor = backendCapabilityProfile({ backend: "claude-code-sandbox", model: "claude-opus-4-8[1m]" });
+assert.equal(claudeSandboxDescriptor.native_dynamic_workflow, true);
+assert.equal(claudeSandboxDescriptor.spawnable, false);
+const taskPacket = subagentTaskPacket({
+  objective: "Review the gateway authority metadata without touching secrets.",
+  allowedRoots: ["runtime/server.js"],
+  deniedPaths: ["auth.json", "state_5.sqlite"],
+  allowedCommands: ["node --test test/*.test.js"],
+  writePolicy: "patch_proposal_only",
+  maxRuntimeMs: 60000,
+  budget: { maxAgents: 2, maxUsd: 0.05 },
+  expectedArtifactSchema: "PatchProposalArtifactV1",
+  stopCondition: "first actionable patch proposal or no findings",
+  authorModel: "grok-build",
+  executorHost: "codex-app",
+});
+assert.equal(taskPacket.kind, "SubagentTaskPacketV1");
+assert.equal(taskPacket.author_model, "grok-build");
+assert.equal(taskPacket.executor_host, "codex-app");
+assert.equal(validateSubagentTaskPacket(taskPacket).ok, true);
+const badAuthorityPacket = subagentTaskPacket({
+  objective: "A non-executor model must not claim sandbox execution authority.",
+  authorModel: "chatgpt-pro-consult",
+  executorHost: "codex-app",
+  authorityMode: AUTHORITY_MODES.SANDBOX_EXECUTOR,
+  allowedRoots: ["runtime/server.js"],
+  deniedPaths: ["auth.json"],
+  allowedCommands: ["npm test"],
+  budget: { maxAgents: 1 },
+  expectedArtifactSchema: "PatchProposalArtifactV1",
+  stopCondition: "no side effects",
+});
+assert.equal(validateSubagentTaskPacket(badAuthorityPacket).ok, false);
+const badClaudeAuthorityPacket = subagentTaskPacket({
+  objective: "Claude -p brain output must not claim sandbox execution authority.",
+  authorModel: "claude-opus-4-8[1m]",
+  executorHost: "codex-app",
+  authorityMode: AUTHORITY_MODES.SANDBOX_EXECUTOR,
+  allowedRoots: ["scripts/ultrawork.mjs"],
+  deniedPaths: ["auth.json"],
+  allowedCommands: ["node scripts/ultrawork.selftest.mjs"],
+  budget: { maxAgents: 1 },
+  expectedArtifactSchema: "PatchProposalArtifactV1",
+  stopCondition: "no direct sandbox side effects",
+});
+assert.equal(validateSubagentTaskPacket(badClaudeAuthorityPacket).ok, false);
+const sandboxDescriptorPacket = subagentTaskPacket({
+  objective: "Represent a future Claude Code sandbox lane without claiming it is currently spawnable.",
+  authorModel: "claude-opus-4-8[1m]",
+  executorHost: "claude-code-sandbox",
+  authorityMode: AUTHORITY_MODES.SANDBOX_EXECUTOR,
+  allowedRoots: ["scripts/ultrawork.mjs"],
+  deniedPaths: ["auth.json"],
+  allowedCommands: ["node scripts/ultrawork.selftest.mjs"],
+  budget: { maxAgents: 1 },
+  expectedArtifactSchema: "PatchProposalArtifactV1",
+  stopCondition: "descriptor only until a real sandbox backend exists",
+});
+const sandboxDescriptorCheck = validateSubagentTaskPacket(sandboxDescriptorPacket);
+assert.equal(sandboxDescriptorCheck.ok, true);
+assert(sandboxDescriptorCheck.warnings.some((warning) => /not yet spawnable|descriptor/i.test(warning)));
+const proJob = proResearchJob({
+  question: "What primary-source evidence is required before claiming chatgpt-pro-consult equals Deep Research?",
+  constraints: ["Do not include secrets", "Prefer official docs"],
+  sourceRequirements: ["OpenAI help/docs", "primary sources only"],
+  expectedClaims: ["Deep Research is asynchronous and sourced"],
+});
+assert.equal(proJob.kind, "ProResearchJobV1");
+assert.equal(proJob.sync_responses_model, false);
+assert.match(proJob.prompt, /Deep Research/i);
+const importedReport = importProResearchReport({
+  job: proJob,
+  researchRanAt: "2026-06-18T00:00:00Z",
+  reportText: "Claim: Deep Research returns sourced reports. Source: https://help.openai.com/en/articles/10500283-deep-research",
+  sourceLinks: ["https://help.openai.com/en/articles/10500283-deep-research"],
+  claims: [
+    { id: "c1", text: "Deep Research returns sourced reports.", evidence: ["https://help.openai.com/en/articles/10500283-deep-research"] },
+    { id: "c2", text: "Unsourced local claim." },
+  ],
+});
+assert.equal(importedReport.kind, "ProResearchImportArtifactV1");
+assert.equal(importedReport.supported_claims.length, 1);
+assert.equal(importedReport.unsupported_claims.length, 1);
+assert.equal(importedReport.provenance_ok, true);
+assert.equal(importedReport.promotion_allowed, false);
+assert.throws(() => proResearchPromotionGate(importedReport), ProResearchPromotionError);
+const incompleteProImport = importProResearchReport({
+  job: proJob,
+  reportText: "Claim: Deep Research returns sourced reports.",
+  claims: [{ id: "c1", text: "Deep Research returns sourced reports.", evidence: ["https://help.openai.com/en/articles/10500283-deep-research"] }],
+});
+assert.equal(incompleteProImport.promotion_allowed, false);
+assert(incompleteProImport.provenance_errors.some((error) => /research_ran_at/.test(error)));
+assert(incompleteProImport.provenance_errors.some((error) => /source_links/.test(error)));
+const cleanProImport = importProResearchReport({
+  job: proJob,
+  researchRanAt: "2026-06-18T00:00:00Z",
+  reportText: "Claim: Deep Research returns sourced reports. Source: https://help.openai.com/en/articles/10500283-deep-research",
+  sourceLinks: ["https://help.openai.com/en/articles/10500283-deep-research"],
+  claims: [{ id: "c1", text: "Deep Research returns sourced reports.", evidence: ["https://help.openai.com/en/articles/10500283-deep-research"] }],
+});
+assert.equal(proResearchPromotionGate(cleanProImport).ok, true);
 const fakePath = "/" + "Users" + "/alice/project";
+const fakeTmpPath = "/" + "tmp" + "/secret-project/file.txt";
+const fakeTildePath = "~" + "/secret-project/file.txt";
+const fakeWindowsPath = "C:" + "\\Users\\alice\\secret.txt";
 const fakeToken = "g" + "hp_" + "abcdefghijklmnopqrstuvwxyz123";
+const fakeXaiToken = "xai-" + "abcdefghijklmnopqrstuvwxyz123";
 const fakeEmail = "a" + "@" + "example.com";
 const fakeId = "0123456789abcdef" + "0123456789abcdef";
-const redacted = redactPublic(`${fakePath} token ${fakeToken} email ${fakeEmail} id ${fakeId}`);
+const contentHash = "a".repeat(64);
+const redacted = redactPublic(`${fakePath} ${fakeTmpPath} ${fakeTildePath} ${fakeWindowsPath} token ${fakeToken} ${fakeXaiToken} email ${fakeEmail} thread_id=${fakeId} content_hash=${contentHash}`);
 assert(!redacted.includes(fakePath));
+assert(!redacted.includes(fakeTmpPath));
+assert(!redacted.includes(fakeTildePath));
+assert(!redacted.includes(fakeWindowsPath));
 assert(!redacted.includes(fakeToken));
+assert(!redacted.includes(fakeXaiToken));
 assert(!redacted.includes(fakeEmail));
 assert(!redacted.includes(fakeId));
+assert(redacted.includes(`content_hash=${contentHash}`));
+const flowLevelsSource = fs.readFileSync(path.join(import.meta.dirname, "flow-levels.mjs"), "utf8");
+assert.match(flowLevelsSource, /ok:\s*v\.confirmed/);
+assert.doesNotMatch(flowLevelsSource, /ok:\s*v\.verdict/);
 assert.throws(() => runMissionCriticalMax(), /not implemented/);
 const premiumPlan = budgetPlan("mission-critical-max", { minimaxPlanConfirmed: true, maxRounds: 3 });
 assert.equal(premiumPlan.profile, "mission-critical-max");

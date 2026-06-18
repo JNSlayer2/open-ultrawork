@@ -1,0 +1,11 @@
+{
+  "name": "open-ultrawork",
+  "version": "4.0.0",
+  "private": false,
+  "description": "Public skill/spec and reference orchestrator for multi-model Dynamic Workflows.",
+  "type": "module",
+  "scripts": {
+    "test": "node --check scripts/ultrawork.mjs && node --check scripts/flow-levels.mjs && node scripts/ultrawork.selftest.mjs"
+  },
+  "license": "MIT"
+}

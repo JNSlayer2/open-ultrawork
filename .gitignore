@@ -1,3 +1,15 @@
 .DS_Store
 ._*
 .__*
+node_modules/
+backups/
+*.bak
+*.bak.*
+.env
+.env.*
+!.env.example
+*.log
+*.jsonl
+state_*.sqlite
+auth.json
+models_cache.json

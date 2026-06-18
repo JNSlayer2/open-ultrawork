@@ -156,6 +156,29 @@ export const DEEP_RESEARCH_LANE = Object.freeze({
   ],
 });
 
+export const AUTHORITY_MODES = Object.freeze({
+  BRAIN_ONLY: "brain_only",
+  PATCH_PROPOSAL: "patch_proposal",
+  TOOL_INTENT_BRIDGE: "tool_intent_bridge",
+  SANDBOX_EXECUTOR: "sandbox_executor",
+  NATIVE_PEER_EXECUTOR: "native_peer_executor",
+});
+
+const APPROVED_EXECUTOR_HOSTS = new Set([
+  "codex",
+  "codex-app",
+  "codex-cli",
+  "openclaw",
+  "claude-code-sandbox",
+  "human",
+]);
+
+const SIDE_EFFECT_AUTHORITY_MODES = new Set([
+  AUTHORITY_MODES.TOOL_INTENT_BRIDGE,
+  AUTHORITY_MODES.SANDBOX_EXECUTOR,
+  AUTHORITY_MODES.NATIVE_PEER_EXECUTOR,
+]);
+
 function cloneDeepResearchLane() {
   return {
     ...DEEP_RESEARCH_LANE,
@@ -556,14 +579,308 @@ export function academicReviewArtifact({ packet, review, promotion = null, comma
   };
 }
 
+function routeModelName(model, fallback = "unknown") {
+  return cleanPublic(String(model || fallback), 120);
+}
+
+function isGatewayExternalModel(model = "") {
+  return /^(opus|sonnet|haiku|fable|grok|minimax)/i.test(String(model));
+}
+
+export function backendCapabilityProfile({ backend = "gateway", model = "", surface = "terminal" } = {}) {
+  const cleanModel = routeModelName(model, backend);
+  if (backend === "claude") {
+    return {
+      backend,
+      model: cleanModel,
+      surface,
+      backend_mode: "claude_print_json_tools_off",
+      native_dynamic_workflow: false,
+      authority_mode: AUTHORITY_MODES.BRAIN_ONLY,
+      patch_proposal: true,
+      direct_write: false,
+      direct_shell: false,
+      note: "Claude -p JSON/no-session/tools-off is a brain subagent, not full Claude Code Dynamic Workflows.",
+    };
+  }
+  if (backend === "claude-code-sandbox") {
+    return {
+      backend,
+      model: cleanModel,
+      surface,
+      backend_mode: "claude_code_sandbox",
+      native_dynamic_workflow: true,
+      spawnable: false,
+      authority_mode: AUTHORITY_MODES.SANDBOX_EXECUTOR,
+      patch_proposal: true,
+      direct_write: "isolated_worktree_only",
+      direct_shell: "allowlisted_commands_only",
+      note: "Profile descriptor only in V4: not a spawnable BACKENDS adapter until a real sandbox executor is implemented.",
+    };
+  }
+  if (backend === "codex") {
+    return {
+      backend,
+      model: cleanModel,
+      surface,
+      backend_mode: "codex_exec_readonly_mcp_off",
+      native_dynamic_workflow: false,
+      authority_mode: AUTHORITY_MODES.SANDBOX_EXECUTOR,
+      patch_proposal: true,
+      direct_write: false,
+      direct_shell: "read_only_sandbox",
+    };
+  }
+  if (backend === "gateway" && isGatewayExternalModel(cleanModel)) {
+    return {
+      backend,
+      model: cleanModel,
+      surface,
+      backend_mode: "gateway_responses_prompt_bridge",
+      native_dynamic_workflow: false,
+      authority_mode: surface === "codex-app" ? AUTHORITY_MODES.TOOL_INTENT_BRIDGE : AUTHORITY_MODES.PATCH_PROPOSAL,
+      patch_proposal: true,
+      direct_write: false,
+      direct_shell: false,
+    };
+  }
+  return {
+    backend,
+    model: cleanModel,
+    surface,
+    backend_mode: backend === "gateway" ? "gateway_responses" : "unknown",
+    native_dynamic_workflow: false,
+    authority_mode: surface === "codex-app" ? AUTHORITY_MODES.TOOL_INTENT_BRIDGE : AUTHORITY_MODES.BRAIN_ONLY,
+    patch_proposal: true,
+    direct_write: false,
+    direct_shell: false,
+  };
+}
+
+export function authorityProfileFor({ backend = "gateway", model = "", surface = "terminal", executorHost = null } = {}) {
+  const capability = backendCapabilityProfile({ backend, model, surface });
+  const authorModel = routeModelName(model || capability.model || backend, backend);
+  const host = executorHost || (surface === "codex-app" ? "codex-app" : surface === "openclaw" ? "openclaw" : "codex-cli");
+  const authorityMode = capability.authority_mode === AUTHORITY_MODES.BRAIN_ONLY && capability.patch_proposal
+    ? AUTHORITY_MODES.PATCH_PROPOSAL
+    : capability.authority_mode;
+  return {
+    author_model: authorModel,
+    decision_model: authorModel,
+    executor_host: host,
+    authority_mode: authorityMode,
+    patch_proposal: Boolean(capability.patch_proposal),
+    native_dynamic_workflow: Boolean(capability.native_dynamic_workflow),
+    backend_mode: capability.backend_mode,
+  };
+}
+
+export function authorizeExecution(step = {}) {
+  const sideEffect = step.writes === true || step.shell === true || step.deploy === true || step.destructive === true || step.sideEffect === true;
+  if (!sideEffect) return true;
+  const host = String(step.executor_host || step.executor || "");
+  const mode = String(step.authority_mode || "");
+  if (!APPROVED_EXECUTOR_HOSTS.has(host)) {
+    throw new ExecutorBoundaryError(`Unapproved executor host for side effects: ${host || "(missing)"}`);
+  }
+  if (!SIDE_EFFECT_AUTHORITY_MODES.has(mode)) {
+    throw new ExecutorBoundaryError("Only tool_intent_bridge, sandbox_executor, or native_peer_executor may claim completed side effects; brain_only and patch_proposal are intent-only.");
+  }
+  if (step.destructive === true && step.authorized !== true) {
+    throw new ExecutorBoundaryError("Destructive side effects require explicit authorization.");
+  }
+  return true;
+}
+
+export function subagentTaskPacket(input = {}) {
+  const objective = cleanPublic(input.objective || "", 1200);
+  if (!objective) throw new TypeError("objective is required.");
+  const packet = {
+    kind: "SubagentTaskPacketV1",
+    created_at: new Date().toISOString(),
+    objective,
+    author_model: routeModelName(input.authorModel || input.author_model || input.model || "unspecified"),
+    executor_host: cleanPublic(input.executorHost || input.executor_host || "codex-cli", 120),
+    authority_mode: input.authorityMode || input.authority_mode || AUTHORITY_MODES.PATCH_PROPOSAL,
+    allowed_roots: (input.allowedRoots || input.allowed_roots || []).map((v) => cleanPublic(v, 500)),
+    allowed_files: (input.allowedFiles || input.allowed_files || []).map((v) => cleanPublic(v, 500)),
+    denied_paths: (input.deniedPaths || input.denied_paths || []).map((v) => cleanPublic(v, 500)),
+    allowed_commands: (input.allowedCommands || input.allowed_commands || []).map((v) => cleanPublic(v, 500)),
+    write_policy: cleanPublic(input.writePolicy || input.write_policy || "patch_proposal_only", 120),
+    max_runtime_ms: Number(input.maxRuntimeMs || input.max_runtime_ms || 600000),
+    budget: redactStructured(input.budget || {}),
+    expected_artifact_schema: cleanPublic(input.expectedArtifactSchema || input.expected_artifact_schema || "FindingArtifactV1", 120),
+    stop_condition: cleanPublic(input.stopCondition || input.stop_condition || "", 500),
+  };
+  packet.content_hash = crypto.createHash("sha256").update(stableJson(packet)).digest("hex");
+  return packet;
+}
+
+export function validateSubagentTaskPacket(packet = {}) {
+  const errors = [];
+  const warnings = [];
+  if (packet.kind !== "SubagentTaskPacketV1") errors.push("kind must be SubagentTaskPacketV1");
+  for (const field of ["objective", "author_model", "executor_host", "authority_mode", "write_policy", "expected_artifact_schema", "stop_condition"]) {
+    if (!packet[field]) errors.push(`${field} is required`);
+  }
+  for (const field of ["allowed_roots", "allowed_files", "denied_paths", "allowed_commands"]) {
+    if (!Array.isArray(packet[field])) errors.push(`${field} must be an array`);
+  }
+  if (!Number.isFinite(Number(packet.max_runtime_ms)) || Number(packet.max_runtime_ms) <= 0) errors.push("max_runtime_ms must be positive");
+  if (!packet.budget || typeof packet.budget !== "object") errors.push("budget object is required");
+  const author = String(packet.author_model || "");
+  const claimsExecutorAuthority = [AUTHORITY_MODES.SANDBOX_EXECUTOR, AUTHORITY_MODES.NATIVE_PEER_EXECUTOR].includes(packet.authority_mode);
+  const explicitClaudeSandbox = packet.executor_host === "claude-code-sandbox" && packet.authority_mode === AUTHORITY_MODES.SANDBOX_EXECUTOR;
+  if (/(?:chatgpt|gpt|grok|minimax|fable|claude|opus|sonnet|haiku)/i.test(author) &&
+      claimsExecutorAuthority &&
+      !explicitClaudeSandbox) {
+    errors.push("non-executor model author_model may not claim sandbox_executor/native_peer_executor authority_mode");
+  }
+  if (explicitClaudeSandbox) {
+    warnings.push("claude-code-sandbox is a V4 profile descriptor and not yet spawnable; do not pass this packet to agent() until a real sandbox backend exists");
+  }
+  return { ok: errors.length === 0, errors, warnings };
+}
+
+export function proResearchJob(input = {}) {
+  const question = cleanPublic(input.question || input.objective || "", 1600);
+  if (!question) throw new TypeError("question is required.");
+  const constraints = (input.constraints || []).map((v) => cleanPublic(v, 500));
+  const sourceRequirements = (input.sourceRequirements || input.source_requirements || []).map((v) => cleanPublic(v, 500));
+  const expectedClaims = (input.expectedClaims || input.expected_claims || []).map((v) => cleanPublic(v, 500));
+  const prompt = [
+    "CHATGPT_PRO_DEEP_RESEARCH_JOB",
+    "",
+    `Question: ${question}`,
+    constraints.length ? `Constraints:\n- ${constraints.join("\n- ")}` : "Constraints:\n- Do not include secrets or private local state.",
+    sourceRequirements.length ? `Source requirements:\n- ${sourceRequirements.join("\n- ")}` : "Source requirements:\n- Prefer primary sources and cite every factual claim.",
+    expectedClaims.length ? `Expected claim ledger seeds:\n- ${expectedClaims.join("\n- ")}` : "Expected output: claim/evidence/status/rebuttal/next_test ledger.",
+    "",
+    "Return a sourced report with source links, limitations, and claims that Codex can verify before promotion.",
+  ].join("\n");
+  const job = {
+    kind: "ProResearchJobV1",
+    created_at: new Date().toISOString(),
+    lane: DEEP_RESEARCH_LANE.id,
+    sync_responses_model: false,
+    executor: DEEP_RESEARCH_LANE.executor,
+    question,
+    constraints,
+    source_requirements: sourceRequirements,
+    expected_claims: expectedClaims,
+    prompt,
+  };
+  job.content_hash = crypto.createHash("sha256").update(stableJson(job)).digest("hex");
+  return job;
+}
+
+export function importProResearchReport({ job, reportText = "", sourceLinks = [], claims = [], limitations = [], researchRanAt = "", research_ran_at = "" } = {}) {
+  if (!job || job.kind !== "ProResearchJobV1") throw new TypeError("ProResearchJobV1 job is required.");
+  const safeSourceLinks = sourceLinks.map((v) => cleanPublic(v, 500));
+  const ranAt = cleanPublic(researchRanAt || research_ran_at, 80);
+  const provenanceErrors = [];
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(ranAt)) {
+    provenanceErrors.push("research_ran_at must be a non-empty ISO timestamp from the human-run ChatGPT Pro Deep Research session");
+  }
+  if (safeSourceLinks.length === 0) {
+    provenanceErrors.push("source_links must include at least one report/source URL before promotion");
+  }
+  const normalizedClaims = claims.map((claim, index) => ({
+    id: cleanPublic(claim.id || `claim-${index + 1}`, 120),
+    text: cleanPublic(claim.text || "", 1000),
+    evidence: (claim.evidence || []).map((v) => cleanPublic(v, 500)),
+  })).filter((claim) => claim.text);
+  const supported = [];
+  const unsupported = [];
+  for (const claim of normalizedClaims) {
+    if (claim.evidence.length > 0) {
+      supported.push({ ...claim, status: "supported" });
+    } else {
+      unsupported.push({ ...claim, status: "unsupported", reason: "missing claim-level evidence" });
+    }
+  }
+  const artifact = {
+    kind: "ProResearchImportArtifactV1",
+    created_at: new Date().toISOString(),
+    job_hash: job.content_hash,
+    research_ran_at: ranAt,
+    source_links: safeSourceLinks,
+    limitations: limitations.map((v) => cleanPublic(v, 500)),
+    report_hash: crypto.createHash("sha256").update(cleanPublic(reportText, 20000)).digest("hex"),
+    supported_claims: supported,
+    unsupported_claims: unsupported,
+    provenance_ok: provenanceErrors.length === 0,
+    provenance_errors: provenanceErrors,
+    promotion_allowed: unsupported.length === 0 && provenanceErrors.length === 0,
+  };
+  artifact.content_hash = crypto.createHash("sha256").update(stableJson(artifact)).digest("hex");
+  return artifact;
+}
+
+export class ProResearchPromotionError extends Error {
+  constructor(message = "Pro Research import is not eligible for promotion.", details = {}) {
+    super(message);
+    this.name = "ProResearchPromotionError";
+    this.reasons = details.reasons || [];
+    this.artifact_hash = details.artifact_hash || null;
+  }
+}
+
+export function proResearchPromotionGate(artifact = {}) {
+  if (!artifact || artifact.kind !== "ProResearchImportArtifactV1") {
+    throw new TypeError("ProResearchImportArtifactV1 artifact is required.");
+  }
+  const reasons = [];
+  if (artifact.provenance_ok !== true) {
+    reasons.push(...(Array.isArray(artifact.provenance_errors) ? artifact.provenance_errors : ["provenance_ok is not true"]));
+  }
+  if (!Array.isArray(artifact.source_links) || artifact.source_links.length === 0) {
+    reasons.push("source_links must be present before promotion");
+  }
+  const unsupported = Array.isArray(artifact.unsupported_claims) ? artifact.unsupported_claims : [];
+  if (unsupported.length > 0) {
+    const ids = unsupported.map((claim) => claim.id || claim.text || "unknown").slice(0, 20).join(", ");
+    reasons.push(`unsupported claims block promotion: ${ids}`);
+  }
+  if (artifact.promotion_allowed !== true) {
+    reasons.push("promotion_allowed is not true");
+  }
+  const uniqueReasons = [...new Set(reasons.filter(Boolean))];
+  if (uniqueReasons.length > 0) {
+    throw new ProResearchPromotionError(`Pro Research promotion blocked: ${uniqueReasons.join("; ")}`, {
+      reasons: uniqueReasons,
+      artifact_hash: artifact.content_hash || null,
+    });
+  }
+  const supported = Array.isArray(artifact.supported_claims) ? artifact.supported_claims : [];
+  return {
+    kind: "ProResearchPromotionGateV1",
+    ok: true,
+    checked_at: new Date().toISOString(),
+    artifact_hash: artifact.content_hash || null,
+    job_hash: artifact.job_hash || null,
+    promoted_claim_ids: supported.map((claim) => claim.id).filter(Boolean),
+    source_count: Array.isArray(artifact.source_links) ? artifact.source_links.length : 0,
+  };
+}
+
 export class PremiumAuthError extends Error { constructor(message = "Premium tier requires explicit mission-critical authorization.") { super(message); this.name = "PremiumAuthError"; } }
 export class BudgetExceeded extends Error { constructor(message = "Budget floor reached.") { super(message); this.name = "BudgetExceeded"; } }
-export class ExecutorBoundaryError extends Error { constructor(message = "Only the Codex executor may perform side effects.") { super(message); this.name = "ExecutorBoundaryError"; } }
+export class ExecutorBoundaryError extends Error { constructor(message = "Only an authorized executor_host may perform side effects.") { super(message); this.name = "ExecutorBoundaryError"; } }
 export function requirePremiumAuth(ctx = {}) { const ok = ctx.mission_critical === true && ctx.authorized === true && ctx.optInKeyword === "ultrawork:max" && typeof ctx.budget === "number" && ctx.budget > 0; if (!ok) throw new PremiumAuthError(); return true; }
 export function resolveTier(taskMeta = {}) { if (taskMeta.requestedTier === "T0-premium" || taskMeta.requestedTier === "premium") { requirePremiumAuth(taskMeta); return "T0-premium"; } if (taskMeta.risk === "high" || taskMeta.needsJudge) return "T2-judge"; if (taskMeta.needsCopilot) return "T1-copilot"; return "T3-scout"; }
 export function budgetGuard(budget, { floorPct = 15 } = {}) { if (!budget || typeof budget.limit !== "number") throw new TypeError("budget.limit is required."); const floor = budget.limit * (floorPct / 100); return { assertCanContinue() { const remaining = budget.limit - (budget.spent ?? 0); if (remaining <= floor) throw new BudgetExceeded(`Budget floor reached: remaining=${remaining}, floor=${floor}`); return { remaining, floor, floorPct }; } }; }
 export function executorOnly(step = {}) { const sideEffect = step.writes === true || step.shell === true || step.deploy === true || step.destructive === true || step.sideEffect === true; if (sideEffect && step.executor !== "codex") throw new ExecutorBoundaryError(); return true; }
-export function redactPublic(value) { return String(value).replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]").replace(/(?:sk|pk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_=-]{12,}/g, "[redacted-token]").replace(/(?:\/Users|\/Volumes|\/home)\/[^\s"'`]+/g, "[redacted-path]").replace(/[A-Fa-f0-9]{32,}/g, "[redacted-id]"); }
+export function redactPublic(value) {
+  return String(value)
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
+    .replace(/(?:sk|pk|xai|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_=-]{12,}/g, "[redacted-token]")
+    .replace(/(?:\/Users|\/Volumes|\/home|\/tmp)\/[^\s"'`]+/g, "[redacted-path]")
+    .replace(/~\/[^\s"'`]+/g, "[redacted-path]")
+    .replace(/[A-Za-z]:\\[^\s"'`]+/g, "[redacted-path]")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[redacted-id]")
+    .replace(/((?:thread|session|rollout|state|conversation)[_-]?id\s*[:=]\s*)[A-Za-z0-9._:-]{12,}/gi, "$1[redacted-id]");
+}
 export function runMissionCriticalMax() { throw new Error("mission-critical-max orchestration is not implemented; this helper currently provides guardrails only."); }
 
 export function shouldUseUltrawork(opts = {}) {
@@ -652,7 +969,7 @@ export function report(opts = {}) {
     ``, `## subagents`,
   ];
   for (const t of transcript) {
-    L.push(`### ${t.label} — ${t.model} (${(t.ms / 1000).toFixed(1)}s, ~$${(t.usd || 0).toFixed(4)})`);
+    L.push(`### ${t.label} — ${t.author_model || t.model} (${authorityLabel(t)}; ${(t.ms / 1000).toFixed(1)}s, ~$${(t.usd || 0).toFixed(4)})`);
     if (!t.ok) { L.push(`**failed:** ${t.error || ""}`, ``); continue; }
     L.push("```", String(t.text || "").slice(0, opts.maxChars || 20000), "```", ``);
   }
@@ -703,10 +1020,21 @@ function assertBudgetAfterCall(label) {
 export function spentUSD() {
   return ledger.reduce((s, e) => s + (e.usd || 0), 0);
 }
+export function costReportKey(entry = {}) {
+  const role = entry.tier || entry.backend || "unknown";
+  const author = entry.author_model || entry.model || "unknown";
+  return `${role}:${author}`;
+}
+export function authorityLabel(entry = {}) {
+  const author = entry.author_model || entry.model || "unknown";
+  const executor = entry.executor_host || "unknown";
+  const mode = entry.authority_mode || "unknown";
+  return `author=${author} executor=${executor} mode=${mode}`;
+}
 export function costReport() {
   const byModel = {};
   for (const e of ledger) {
-    const k = `${e.tier || e.backend}:${e.model}`;
+    const k = costReportKey(e);
     byModel[k] = byModel[k] || { calls: 0, tokens: 0, usd: 0 };
     byModel[k].calls++;
     byModel[k].tokens += e.tokens || 0;
@@ -869,7 +1197,8 @@ function resolve(opts) {
  * Spawn one isolated-context subagent.
  * @param {string} prompt
  * @param {{tier?:string, backend?:string, model?:string, label?:string, schema?:object,
- *          retries?:number, timeoutMs?:number}} [opts]
+ *          retries?:number, timeoutMs?:number, surface?:string, executorHost?:string,
+ *          executor_host?:string}} [opts]
  * @returns {Promise<string|object>} text, or parsed object when schema is given
  */
 export async function agent(prompt, opts = {}) {
@@ -878,6 +1207,12 @@ export async function agent(prompt, opts = {}) {
   const fn = BACKENDS[backend];
   if (!fn) throw new Error(`unknown backend: ${backend} (claude|codex|gateway)`);
   const label = opts.label || `${opts.tier || backend}#${id}`;
+  const authority = authorityProfileFor({
+    backend,
+    model,
+    surface: opts.surface || process.env.UW_SURFACE || "terminal",
+    executorHost: opts.executorHost || opts.executor_host,
+  });
   let fullPrompt = prompt;
   if (opts.schema) {
     fullPrompt =
@@ -902,10 +1237,10 @@ export async function agent(prompt, opts = {}) {
       const { text, tokens } = await fn(fullPrompt, model, opts.timeoutMs || TIMEOUT_MS);
       const tok = tokens ?? estTokens(fullPrompt) + estTokens(text);
       const usd = recordCost(model, tok);
-      ledger.push({ tier: opts.tier, backend, model, tokens: tok, usd, ms: Date.now() - t0, ok: true });
+      ledger.push({ tier: opts.tier, backend, model, ...authority, tokens: tok, usd, ms: Date.now() - t0, ok: true });
       let value = opts.schema ? parseJsonLoose(text, label) : text;
-      transcript.push({ id, label, tier: opts.tier, backend, model, ms: Date.now() - t0, usd, ok: true, text });
-      journal({ id, key, label, backend, model, tokens: tok, usd, ms: Date.now() - t0, ok: true, result: value });
+      transcript.push({ id, label, tier: opts.tier, backend, model, ...authority, ms: Date.now() - t0, usd, ok: true, text });
+      journal({ id, key, label, backend, model, ...authority, tokens: tok, usd, ms: Date.now() - t0, ok: true, result: value });
       assertBudgetAfterCall(label);
       log(`✓ ${label} (${((Date.now() - t0) / 1000).toFixed(1)}s, ~$${usd.toFixed(4)})`);
       return value;
@@ -925,9 +1260,9 @@ export async function agent(prompt, opts = {}) {
     log(`⚠ ${label}: codex auth failure (re-login needed) → falling back to gateway:${fbModel}`);
     return agent(prompt, { ...opts, tier: undefined, backend: "gateway", model: fbModel, label: `${label}→fb:${fbModel}`, _authFallback: true });
   }
-  ledger.push({ tier: opts.tier, backend, model, ms: Date.now() - t0, ok: false });
-  transcript.push({ id, label, tier: opts.tier, backend, model, ms: Date.now() - t0, ok: false, error: lastErr?.message });
-  journal({ id, key, label, backend, model, ms: Date.now() - t0, ok: false, error: lastErr?.message });
+  ledger.push({ tier: opts.tier, backend, model, ...authority, ms: Date.now() - t0, ok: false });
+  transcript.push({ id, label, tier: opts.tier, backend, model, ...authority, ms: Date.now() - t0, ok: false, error: lastErr?.message });
+  journal({ id, key, label, backend, model, ...authority, ms: Date.now() - t0, ok: false, error: lastErr?.message });
   log(`✗ ${label}: ${lastErr?.message}`);
   throw lastErr;
 }
@@ -1012,4 +1347,4 @@ export async function pipeline(items, ...stages) {
   );
 }
 
-export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, MAX_CHILD_OUTPUT_BYTES, TIERS, COST_PER_MTOK, TASK_PROFILES, DEEP_RESEARCH_LANE, ACADEMIC_REVIEW_SCHEMA };
+export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, MAX_CHILD_OUTPUT_BYTES, TIERS, COST_PER_MTOK, TASK_PROFILES, DEEP_RESEARCH_LANE, AUTHORITY_MODES, ACADEMIC_REVIEW_SCHEMA };

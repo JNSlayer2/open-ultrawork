@@ -8,7 +8,17 @@
 //
 // 每級遵守 skill 預算表:S 不開 fan-out;M ≤4 sub/1 reviewer;L ≤16 sub + 對抗驗證;
 // XL 分批 + loop-until-dry + budget guard。等級不對外加碼:取能完成任務的最低級別。
-import { agent, parallel, verify, log, report, setBudget, costReport } from "./ultrawork.mjs";
+import {
+  agent,
+  parallel,
+  verify,
+  log,
+  report,
+  setBudget,
+  costReport,
+  subagentTaskPacket,
+  validateSubagentTaskPacket,
+} from "./ultrawork.mjs";
 
 const LEVEL = (process.env.UW_LEVEL || "S").toUpperCase();
 const TASK = process.env.UW_TASK || "";
@@ -34,11 +44,38 @@ setBudget(Number(process.env.UW_BUDGET_USD || P.budget));
 
 // 命中核心:所有 fan-out 一律 schema 化短輸出,可去重、可合併,不讓自由長文淹沒主控。
 const FINDING_SCHEMA = {
-  findings: [{ severity: "P0|P1|P2|P3", title: "string", evidence: "string(一句)" }],
+  findings: [{
+    severity: "P0|P1|P2|P3",
+    title: "string",
+    evidence: "string(一句)",
+    suggested_fix: "string(<=120 chars)",
+  }],
+  refutations: [{ target: "string", reason: "string(一句)" }],
+  patch_proposal: "string(optional unified diff or short patch intent; <=1200 chars; empty if not confident)",
   no_findings: "boolean",
 };
 
 log(`level=${LEVEL} budget=$${P.budget} fanout<=${P.fanout} rounds<=${P.rounds}`);
+
+const workflowPacket = subagentTaskPacket({
+  objective: TASK,
+  authorModel: "ultrawork-economy-scout",
+  executorHost: "codex-cli",
+  allowedRoots: (process.env.UW_ALLOWED_ROOTS || ".").split(",").map((s) => s.trim()).filter(Boolean),
+  deniedPaths: (process.env.UW_DENIED_PATHS || "auth.json,state_5.sqlite,.env,.env.local").split(",").map((s) => s.trim()).filter(Boolean),
+  allowedCommands: (process.env.UW_ALLOWED_COMMANDS || "").split(",").map((s) => s.trim()).filter(Boolean),
+  writePolicy: "patch_proposal_only",
+  maxRuntimeMs: Number(process.env.UW_MAX_RUNTIME_MS || 600000),
+  budget: { usd: Number(process.env.UW_BUDGET_USD || P.budget), fanout: P.fanout, rounds: P.rounds, verifyVotes: P.verifyVotes },
+  expectedArtifactSchema: "FindingArtifactV1+PatchProposalArtifactV1",
+  stopCondition: `rounds<=${P.rounds}; dry>=2; budget exhausted; max ${P.fanout} scouts per round; no direct side effects`,
+});
+const packetCheck = validateSubagentTaskPacket(workflowPacket);
+if (!packetCheck.ok) {
+  console.error(`invalid task packet: ${packetCheck.errors.join("; ")}`);
+  process.exit(4);
+}
+const WORKFLOW_PACKET_TEXT = JSON.stringify(workflowPacket).slice(0, 2400);
 
 // ---- S:單模型直答,不開 workflow(協調成本 > 收益時的誠實降級)----
 if (LEVEL === "S") {
@@ -58,6 +95,8 @@ const ANGLES = [
 
 const seen = new Set();
 let allFindings = [];
+let allRefutations = [];
+let patchProposals = [];
 let dry = 0;
 
 for (let round = 1; round <= P.rounds && dry < 2; round++) {
@@ -66,12 +105,20 @@ for (let round = 1; round <= P.rounds && dry < 2; round++) {
     ANGLES.map((angle, i) => () =>
       agent(
         `任務:${TASK}\n你的唯一視角:${angle}。只報告此視角的發現,其他視角會由別的 agent 覆蓋。` +
+        `\n任務包:${WORKFLOW_PACKET_TEXT}` +
+        `\n輸出要短。若要給 patch_proposal,只在很有把握且範圍很小時給 unified diff 或 patch intent；不要長文。` +
         (round > 1 ? `\n已知發現(不要重複):${[...seen].join("; ").slice(0, 2000)}` : ""),
         { tier: "economy", label: `scout:${angle}#r${round}`, schema: FINDING_SCHEMA, retries: 1 },
       ).catch(() => null),
     ),
   );
-  const fresh = results.filter(Boolean).flatMap((r) => r.findings || [])
+  const validResults = results.filter(Boolean);
+  allRefutations.push(...validResults.flatMap((r) => r.refutations || [])
+    .filter((r) => r && r.target && r.reason));
+  patchProposals.push(...validResults.map((r) => String(r.patch_proposal || "").trim())
+    .filter(Boolean)
+    .map((text) => text.slice(0, 1200)));
+  const fresh = validResults.flatMap((r) => r.findings || [])
     .filter((f) => f && f.title && !seen.has(f.title));
   if (!fresh.length) { dry++; continue; }
   dry = 0;
@@ -88,7 +135,7 @@ if (P.verifyVotes >= 3) {
     critical.map((f) => () =>
       verify(`finding「${f.title}」(${f.evidence})是真實、可操作、非誤報`, {
         tiers: ["economy", "fast", "standard"].slice(0, P.verifyVotes),
-      }).then((v) => ({ f, ok: v.verdict })).catch(() => ({ f, ok: true })), // 驗證器壞掉時保守保留
+      }).then((v) => ({ f, ok: v.confirmed })).catch(() => ({ f, ok: true })), // 驗證器壞掉時保守保留
     ),
   );
   const killed = verdicts.filter((v) => !v.ok).map((v) => v.f.title);
@@ -100,8 +147,10 @@ if (P.verifyVotes >= 3) {
 log("heavy convergence");
 const final = await agent(
   `任務:${TASK}\n以下是多視角 scout findings(已去重${P.verifyVotes >= 3 ? "+對抗驗證" : ""})。` +
-  `收斂成:1) top 風險排序 2) 每項一行修法 3) 哪些可忽略與為何。<=20 行,繁中。\n\n` +
-  JSON.stringify(allFindings).slice(0, 12000),
+  `\n任務包與停止條件:${WORKFLOW_PACKET_TEXT}\n` +
+  `同時參考 refutations 與 bounded patch proposals。` +
+  `收斂成:1) top 風險排序 2) 每項一行修法 3) 可採用的小 patch intent 4) 哪些可忽略與為何。<=20 行,繁中。\n\n` +
+  JSON.stringify({ findings: allFindings, refutations: allRefutations, patch_proposals: patchProposals }).slice(0, 12000),
   { tier: "heavy", label: "converge", retries: 1 },
 );
 

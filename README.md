@@ -26,6 +26,20 @@ In short:
 > `open-ultrawork` 告訴你**多 AI 協作要怎麼編排**。  
 > `codex-app-model-gateway` 負責讓 Codex App **真的接得到那些他牌模型**。
 
+
+## V4: model authorship, executor host, and Pro Research
+
+The V4 contract separates **who authored the decision** from **who executed side effects**:
+
+- `author_model`: the model that produced the plan, findings, patch proposal, or judgment.
+- `decision_model`: the model whose judgment the artifact represents; usually the same as `author_model`.
+- `executor_host`: the trusted host that actually performs file writes, shell commands, tests, browser/computer-use, deployment, or rollback.
+- `authority_mode`: one of `brain_only`, `patch_proposal`, `tool_intent_bridge`, `sandbox_executor`, or `native_peer_executor`.
+
+This means an external model can be the real author of a patch proposal while Codex, OpenClaw, or another local host remains the executor. Patch proposals are intent only; side effects require an approved executor path and traceable receipts.
+
+`chatgpt-pro-consult` should be treated as a fast GPT-5.5 / Pro-account consult lane inside Codex-style workflows. It is **not** equivalent to ChatGPT App Deep Research. True ChatGPT Pro research uses an async `ProResearchJobV1`: create a bounded research packet, run Deep Research manually in ChatGPT Pro, import source links and claims, then pass `proResearchPromotionGate()` before promoting claims.
+
 ## 快速更新 / Quick update
 
 ```bash
@@ -204,11 +218,13 @@ scripts/
   ultrawork.mjs
   ultrawork.selftest.mjs
   example-flow.mjs
+  flow-levels.mjs
 ```
 
 - `SKILL.md`: the main skill spec
 - `scripts/ultrawork.mjs`: portable reference orchestrator and policy helpers
 - `scripts/ultrawork.selftest.mjs`: quick public-safe regression checks
+- `scripts/flow-levels.mjs`: S/M/L/XL workflow templates with bounded task packets and stop conditions
 - `agents/openai.yaml`: agent-facing metadata and invocation policy
 
 ## Good fit
