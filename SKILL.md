@@ -133,7 +133,7 @@ log(costReport());
 - `heavy` → claude `claude-opus-4-8[1m]`（最強推理、1M context、收斂）
 - `judge` → gateway `opus-4-8`（premium 裁決）
 
-後端（皆獨立 context，本機已實測）：`claude`（claude -p，JSON、無 session、工具全關）、`codex`（codex exec、`-c mcp_servers={}`、`-o` 乾淨輸出、`CODEX_HOME=$HOME/.codex` 勿用 noowners 卷見 [[learning_codex_external_volume_perm]]）、`gateway`（POST `/v1/responses` stream:false 取 `output_text`）。
+後端（皆獨立 context，本機已實測）：`claude`（claude -p，JSON、無 session、工具全關）、`codex`（codex exec、`-c mcp_servers={}`、`-o` 乾淨輸出、預設只在 `~/.codex-sub` 已明確設定 `model_provider = "model_gateway"` 時使用 sub-home，否則回落 `CODEX_HOME=$HOME/.codex`；可用 `UW_CODEX_HOME` 覆寫，勿用 noowners 卷見 [[learning_codex_external_volume_perm]]）、`gateway`（POST `/v1/responses` stream:false 取 `output_text`）。
 
 特性：成本帳 + budget 硬上限；`UW_RESUME=1`+`UW_JOURNAL` 斷點續跑（依 backend|model|prompt hash 快取）；`retries` + claude model 404 自動退回 bare family alias。
 

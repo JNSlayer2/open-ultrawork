@@ -48,10 +48,23 @@ import crypto from "node:crypto";
 const HOME = os.homedir();
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
 const CODEX_COMMAND = process.env.CODEX_COMMAND || "codex";
-// Prefer a dedicated SSD sub-home for codex subagents so codex exec never touches a
-// noowners external volume (which can stall the controller). Falls back to ~/.codex.
+const MAIN_CODEX_HOME = path.join(HOME, ".codex");
+const SUB_CODEX_HOME = path.join(HOME, ".codex-sub");
+
+function codexHomeHasModelGateway(homeDir) {
+  try {
+    const cfg = fs.readFileSync(path.join(homeDir, "config.toml"), "utf8");
+    return /^\s*model_provider\s*=\s*["']model_gateway["']/m.test(cfg);
+  } catch {
+    return false;
+  }
+}
+
+// Prefer a dedicated SSD sub-home only when it is configured for model_gateway.
+// A bare ~/.codex-sub with just auth.json makes codex exec fall back to provider=openai,
+// where gateway slugs like chatgpt-pro-consult are rejected. Falls back to ~/.codex.
 const CODEX_HOME = process.env.UW_CODEX_HOME
-  || (fs.existsSync(path.join(HOME, ".codex-sub")) ? path.join(HOME, ".codex-sub") : path.join(HOME, ".codex"));
+  || (fs.existsSync(SUB_CODEX_HOME) && codexHomeHasModelGateway(SUB_CODEX_HOME) ? SUB_CODEX_HOME : MAIN_CODEX_HOME);
 const GATEWAY_URL = (process.env.UW_GATEWAY_URL || "http://127.0.0.1:4177").replace(/\/+$/, "");
 const TIMEOUT_MS = Number(process.env.UW_TIMEOUT_MS || 600000);
 const CONCURRENCY = Number(process.env.UW_CONCURRENCY || Math.max(2, Math.min(8, os.cpus().length - 2)));
