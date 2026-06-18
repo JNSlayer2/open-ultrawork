@@ -5,6 +5,13 @@ import {
   shouldUseUltrawork,
   budgetPlan,
   deepResearchPlanForTask,
+  ACADEMIC_REVIEW_SCHEMA,
+  academicContinuityPacket,
+  proAcademicPrompt,
+  academicCollaborationPlan,
+  academicPromotionGate,
+  academicReviewArtifact,
+  AcademicPromotionError,
   PremiumAuthError,
   BudgetExceeded,
   ExecutorBoundaryError,
@@ -31,6 +38,66 @@ assert.equal(profileForTask("frontend UI style exploration").id, "ui");
 assert.equal(profileForTask("security review of auth diff").id, "security");
 assert.equal(profileForTask("trading strategy backtest with Hermes").id, "trading");
 assert.equal(profileForTask("edit an existing skill and improve docs").id, "memory");
+assert.equal(profileForTask("academic source-grounded code review and paper-style evidence audit").id, "academic");
+const academicPlan = budgetPlan("academic", { minimaxPlanConfirmed: true, maxRounds: 2 });
+assert.equal(academicPlan.primary, "chatgpt-pro-consult");
+assert(academicPlan.verification.some((v) => /claim.*evidence|citation|rebuttal/i.test(v)));
+assert.equal(academicPlan.maxOutputTokensPerAgent <= 1200, true);
+const acPacket = academicContinuityPacket({
+  planId: "pro-academic-smoke",
+  question: "Does the ChatGPT Pro lane preserve enough context for code-health review?",
+  constraints: ["Codex executes side effects only", "No local secrets in public packet"],
+  claims: [{ id: "c1", text: "chatgpt-pro-consult rewrites only the model field", evidence: ["runtime/server.js:gptPassthroughBodyText"], status: "observed" }],
+  decisions: ["Use explicit continuity packet for open-ultrawork isolated agents"],
+  openQuestions: ["Should advisory mode strip tool schemas?"],
+  verificationCommands: ["npm test --prefix runtime"],
+  artifactRefs: ["commit:c80a426"],
+});
+assert.equal(acPacket.kind, "AcademicContinuityPacketV1");
+assert.match(acPacket.content_hash, /^[a-f0-9]{64}$/);
+assert.equal(acPacket.claims[0].evidence[0], "runtime/server.js:gptPassthroughBodyText");
+assert(!JSON.stringify(acPacket).includes("/Users/"));
+const acPrompt = proAcademicPrompt(acPacket);
+assert.match(acPrompt, /PRO_ACADEMIC_REVIEW/);
+assert.match(acPrompt, /claim.*evidence/i);
+assert.match(acPrompt, /unsupported|rebuttal/i);
+assert.equal(ACADEMIC_REVIEW_SCHEMA.verdict, "string");
+const acWorkflow = academicCollaborationPlan({ task: "high risk architecture review", packet: acPacket });
+assert.equal(acWorkflow.primaryTier, "chatgpt-pro-consult");
+assert(acWorkflow.steps.some((step) => /claim ledger/i.test(step)));
+const hypothesisPacket = academicContinuityPacket({
+  planId: "hypothesis-smoke",
+  question: "Is an unsupported claim prevented from promotion?",
+  claims: [{ id: "u1", text: "This unsupported claim must not be promoted" }],
+});
+assert.equal(hypothesisPacket.claims[0].status, "hypothesis");
+assert.throws(() => academicPromotionGate({
+  verdict: "ship",
+  supported_claims: [],
+  unsupported_claims: [{ id: "u1", reason: "no evidence" }],
+  rebuttals: [{ target: "u1", objection: "unsupported", severity: "P1" }],
+  next_tests: [],
+}), AcademicPromotionError);
+const promoted = academicPromotionGate({
+  verdict: "ship-with-follow-up",
+  supported_claims: [{ id: "c1", reason: "code evidence", evidence_used: ["runtime/server.js"] }],
+  unsupported_claims: [],
+  rebuttals: [{ target: "c1", objection: "minor caveat", severity: "P3" }],
+  next_tests: ["npm test"],
+});
+assert.equal(promoted.ok, true);
+assert.equal(promoted.promoted_claim_ids[0], "c1");
+const acArtifact = academicReviewArtifact({ packet: acPacket, review: {
+  verdict: "ship-with-follow-up",
+  supported_claims: [{ id: "c1", reason: "code evidence", evidence_used: ["runtime/server.js"] }],
+  unsupported_claims: [],
+  rebuttals: [],
+  next_tests: ["npm test"],
+}, promotion: promoted });
+assert.equal(acArtifact.kind, "AcademicReviewArtifactV1");
+assert.equal(acArtifact.packet_hash, acPacket.content_hash);
+assert.match(acArtifact.review_hash, /^[a-f0-9]{64}$/);
+assert.equal(acArtifact.promotion.ok, true);
 
 const companions = companionSkillsFor({ taskType: "security", hasDiff: true, wantsProjectMap: true, skillAuthoring: true });
 assert(companions.some((s) => s.id === "gitnexus:gitnexus"));

@@ -207,6 +207,18 @@ export const TASK_PROFILES = Object.freeze({
     stopConditions: ["every diff-scoped file has a receipt", "false positives pruned by reviewer"],
     verification: ["git diff", "tests/lint", "reviewer risk pass"],
   },
+  academic: {
+    id: "academic",
+    aliases: ["academic", "research", "paper", "literature", "source", "citation", "claim", "evidence", "學術", "研究", "論文", "來源", "證據"],
+    level: "M",
+    primary: "chatgpt-pro-consult",
+    economy: ["minimax-m3", "grok-build"],
+    heavy: ["opus-4-8"],
+    maxAgents: 12,
+    companionSkills: [],
+    stopConditions: ["claim ledger has source/evidence status for every important assertion", "unsupported claims are demoted to hypotheses", "rebuttal pass produces no unaddressed P0/P1 objections"],
+    verification: ["claim-evidence ledger", "citation/source cross-check", "rebuttal and alternative-hypothesis pass", "Codex deterministic test or artifact check"],
+  },
   env: {
     id: "env",
     aliases: ["env", "environment", "gateway", "openclaw", "setup", "install", "runtime", "launchagent"],
@@ -304,7 +316,7 @@ export function profileForTask(task = "") {
   const lower = text.toLowerCase();
   // Prefer higher-risk/specialized profiles when generic words like "review" or
   // "diff" co-occur with security or migration terms.
-  const priority = ["mission-critical-max", "security", "trading", "migration", "env", "ui", "memory", "review"];
+  const priority = ["mission-critical-max", "security", "trading", "migration", "academic", "env", "ui", "memory", "review"];
   for (const id of priority) {
     const p = TASK_PROFILES[id];
     if (p.aliases.some((a) => lower.includes(String(a).toLowerCase()))) return profile(p.id);
@@ -378,6 +390,168 @@ export function deepResearchPlanForTask(task = "", opts = {}) {
     countsAsApiFanout: false,
     promptPackages,
     importRule: "Only import sourced claims; Codex must verify primary sources before turning findings into runtime/router artifacts.",
+  };
+}
+
+export const ACADEMIC_REVIEW_SCHEMA = Object.freeze({
+  verdict: "string",
+  confidence_0_to_1: "number",
+  supported_claims: [{ id: "string", reason: "string", evidence_used: ["string"] }],
+  unsupported_claims: [{ id: "string", reason: "string", missing_evidence: ["string"] }],
+  rebuttals: [{ target: "string", objection: "string", severity: "P0|P1|P2|P3" }],
+  alternative_hypotheses: ["string"],
+  next_tests: ["string"],
+  final_recommendation: "string",
+});
+
+function listify(value) {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function cleanPublic(value, maxChars = 2000) {
+  return redactPublic(String(value ?? "")).slice(0, maxChars);
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * Build a public-safe packet for Pro-level academic/code collaboration.
+ * The packet is deliberately explicit: isolated subagents cannot inherit the
+ * controller's whole thread, so accuracy depends on a concise claim/evidence ledger.
+ */
+export function academicContinuityPacket(input = {}) {
+  const rawClaims = listify(input.claims).map((claim, i) => {
+    const obj = typeof claim === "string" ? { text: claim } : (claim || {});
+    return {
+      id: cleanPublic(obj.id || `c${i + 1}`, 80),
+      text: cleanPublic(obj.text || obj.claim || "", 1000),
+      evidence: listify(obj.evidence || obj.sources || obj.refs).map((e) => cleanPublic(e, 500)).filter(Boolean),
+      status: cleanPublic(obj.status || (listify(obj.evidence || obj.sources || obj.refs).length ? "unverified" : "hypothesis"), 80),
+    };
+  }).filter((claim) => claim.text);
+  const packet = {
+    kind: "AcademicContinuityPacketV1",
+    plan_id: cleanPublic(input.planId || input.plan_id || `uw-academic-${Date.now()}`, 120),
+    question: cleanPublic(input.question || input.task || input.goal || "", 1500),
+    constraints: listify(input.constraints).map((x) => cleanPublic(x, 600)).filter(Boolean),
+    decisions: listify(input.decisions).map((x) => cleanPublic(x, 600)).filter(Boolean),
+    claims: rawClaims,
+    open_questions: listify(input.openQuestions || input.open_questions).map((x) => cleanPublic(x, 600)).filter(Boolean),
+    next_codex_action: cleanPublic(input.nextCodexAction || input.next_codex_action || "Codex verifies supported claims before side effects.", 600),
+    done_condition: cleanPublic(input.doneCondition || input.done_condition || "Every promoted claim has evidence or is marked as hypothesis; Codex has a deterministic verification step.", 600),
+    verification_commands: listify(input.verificationCommands || input.verification_commands).map((x) => cleanPublic(x, 400)).filter(Boolean),
+    artifact_refs: listify(input.artifactRefs || input.artifact_refs).map((x) => cleanPublic(x, 400)).filter(Boolean),
+    source_policy: cleanPublic(input.sourcePolicy || input.source_policy || "Prefer primary sources/runtime evidence; unsupported claims must be demoted to hypotheses.", 600),
+  };
+  packet.content_hash = crypto.createHash("sha256").update(stableJson(packet)).digest("hex");
+  return packet;
+}
+
+export function proAcademicPrompt(packetOrInput = {}, opts = {}) {
+  const packet = packetOrInput.kind === "AcademicContinuityPacketV1" ? packetOrInput : academicContinuityPacket(packetOrInput);
+  const mode = opts.mode || "code-and-research-health-review";
+  return [
+    "PRO_ACADEMIC_REVIEW",
+    "Role: ChatGPT Pro Consult acts as a rigorous academic collaborator and code-health reviewer.",
+    "Boundary: advisory only; do not claim tool execution, file writes, shell, deployment, or live account access.",
+    "Method: separate claims from evidence; mark unsupported claims; claims without evidence are hypotheses, not conclusions; search for rebuttals and alternative hypotheses; propose deterministic Codex verification steps.",
+    `Mode: ${mode}`,
+    "Return a compact JSON object matching the supplied schema. No prose outside JSON.",
+    "Packet:",
+    JSON.stringify(packet, null, 2),
+    "Schema:",
+    JSON.stringify(ACADEMIC_REVIEW_SCHEMA),
+  ].join("\n");
+}
+
+export function academicCollaborationPlan(opts = {}) {
+  const packet = opts.packet ? (opts.packet.kind === "AcademicContinuityPacketV1" ? opts.packet : academicContinuityPacket(opts.packet)) : null;
+  const p = profile("academic");
+  return {
+    profile: p.id,
+    level: p.level,
+    primaryTier: "chatgpt-pro-consult",
+    economyTiers: [...p.economy],
+    judgeTier: "opus-4-8",
+    packetRequired: true,
+    packetHash: packet?.content_hash || null,
+    steps: [
+      "Codex builds an AcademicContinuityPacketV1 with claim ledger, constraints, verification commands, and artifact refs",
+      "ChatGPT Pro Consult performs claim-evidence review, rebuttal search, and alternative-hypothesis generation",
+      "Economy subagents may fan out only on narrow extraction/refutation tasks with schema-limited outputs",
+      "Opus/judge reviews unresolved high-risk objections when Pro and evidence disagree",
+      "Codex promotes only supported claims into code, docs, tests, or runtime artifacts and records verification evidence",
+    ],
+    stopConditions: [...p.stopConditions],
+  };
+}
+
+export async function proAcademicReview(input = {}, opts = {}) {
+  const packet = input.kind === "AcademicContinuityPacketV1" ? input : academicContinuityPacket(input);
+  return agent(proAcademicPrompt(packet, opts), {
+    tier: opts.tier || "chatgpt-pro-consult",
+    label: opts.label || "pro-academic-review",
+    schema: opts.schema || ACADEMIC_REVIEW_SCHEMA,
+    retries: opts.retries ?? 0,
+    timeoutMs: opts.timeoutMs,
+  });
+}
+
+export class AcademicPromotionError extends Error { constructor(message = "Academic review has unsupported claims or blocking rebuttals.") { super(message); this.name = "AcademicPromotionError"; } }
+
+function rebuttalSeverityRank(value) {
+  const m = /P([0-3])/i.exec(String(value || ""));
+  return m ? Number(m[1]) : 3;
+}
+
+export function academicPromotionGate(review = {}, opts = {}) {
+  const unsupported = listify(review.unsupported_claims);
+  const rebuttals = listify(review.rebuttals);
+  const blocking = rebuttals.filter((r) => rebuttalSeverityRank(r.severity) <= (opts.blockAtSeverity ?? 1));
+  if (unsupported.length && opts.allowUnsupported !== true) {
+    throw new AcademicPromotionError(`Unsupported claims cannot be promoted: ${unsupported.map((c) => c.id || c.target || "unknown").join(", ")}`);
+  }
+  if (blocking.length) {
+    throw new AcademicPromotionError(`Blocking rebuttals remain: ${blocking.map((r) => `${r.target || "claim"}:${r.severity || "P?"}`).join(", ")}`);
+  }
+  const supported = listify(review.supported_claims);
+  return {
+    ok: true,
+    verdict: cleanPublic(review.verdict || "", 200),
+    promoted_claim_ids: supported.map((c) => cleanPublic(c.id || c.target || "", 80)).filter(Boolean),
+    required_next_tests: listify(review.next_tests).map((t) => cleanPublic(t, 300)).filter(Boolean),
+    caveat_count: rebuttals.length,
+  };
+}
+
+function redactStructured(value) {
+  if (Array.isArray(value)) return value.map(redactStructured);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [cleanPublic(k, 120), redactStructured(v)]));
+  }
+  return typeof value === "string" ? cleanPublic(value, 2000) : value;
+}
+
+export function academicReviewArtifact({ packet, review, promotion = null, command = null } = {}) {
+  if (!packet || packet.kind !== "AcademicContinuityPacketV1") throw new TypeError("AcademicContinuityPacketV1 packet is required.");
+  if (!review || typeof review !== "object") throw new TypeError("review object is required.");
+  const safeReview = redactStructured(review);
+  const safePromotion = promotion ? redactStructured(promotion) : null;
+  return {
+    kind: "AcademicReviewArtifactV1",
+    created_at: new Date().toISOString(),
+    packet_hash: packet.content_hash,
+    review_hash: crypto.createHash("sha256").update(stableJson(safeReview)).digest("hex"),
+    command: command ? cleanPublic(command, 500) : null,
+    review: safeReview,
+    promotion: safePromotion,
   };
 }
 
@@ -837,4 +1011,4 @@ export async function pipeline(items, ...stages) {
   );
 }
 
-export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, MAX_CHILD_OUTPUT_BYTES, TIERS, COST_PER_MTOK, TASK_PROFILES, DEEP_RESEARCH_LANE };
+export const config = { CLAUDE_COMMAND, CODEX_COMMAND, CODEX_HOME, GATEWAY_URL, CONCURRENCY, TIMEOUT_MS, MAX_CHILD_OUTPUT_BYTES, TIERS, COST_PER_MTOK, TASK_PROFILES, DEEP_RESEARCH_LANE, ACADEMIC_REVIEW_SCHEMA };
