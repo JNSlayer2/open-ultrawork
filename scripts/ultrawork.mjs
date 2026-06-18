@@ -447,6 +447,7 @@ export function academicContinuityPacket(input = {}) {
     next_codex_action: cleanPublic(input.nextCodexAction || input.next_codex_action || "Codex verifies supported claims before side effects.", 600),
     done_condition: cleanPublic(input.doneCondition || input.done_condition || "Every promoted claim has evidence or is marked as hypothesis; Codex has a deterministic verification step.", 600),
     verification_commands: listify(input.verificationCommands || input.verification_commands).map((x) => cleanPublic(x, 400)).filter(Boolean),
+    verification_receipts: listify(input.verificationReceipts || input.verification_receipts).map((x) => cleanPublic(x, 600)).filter(Boolean),
     artifact_refs: listify(input.artifactRefs || input.artifact_refs).map((x) => cleanPublic(x, 400)).filter(Boolean),
     source_policy: cleanPublic(input.sourcePolicy || input.source_policy || "Prefer primary sources/runtime evidence; unsupported claims must be demoted to hypotheses.", 600),
   };
@@ -483,7 +484,7 @@ export function academicCollaborationPlan(opts = {}) {
     packetRequired: true,
     packetHash: packet?.content_hash || null,
     steps: [
-      "Codex builds an AcademicContinuityPacketV1 with claim ledger, constraints, verification commands, and artifact refs",
+      "Codex builds an AcademicContinuityPacketV1 with claim ledger, constraints, verification commands, verification receipts, and artifact refs",
       "ChatGPT Pro Consult performs claim-evidence review, rebuttal search, and alternative-hypothesis generation",
       "Economy subagents may fan out only on narrow extraction/refutation tasks with schema-limited outputs",
       "Opus/judge reviews unresolved high-risk objections when Pro and evidence disagree",

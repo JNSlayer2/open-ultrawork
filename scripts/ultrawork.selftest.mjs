@@ -51,11 +51,13 @@ const acPacket = academicContinuityPacket({
   decisions: ["Use explicit continuity packet for open-ultrawork isolated agents"],
   openQuestions: ["Should advisory mode strip tool schemas?"],
   verificationCommands: ["npm test --prefix runtime"],
+  verificationReceipts: ["npm test --prefix runtime: pass"],
   artifactRefs: ["commit:c80a426"],
 });
 assert.equal(acPacket.kind, "AcademicContinuityPacketV1");
 assert.match(acPacket.content_hash, /^[a-f0-9]{64}$/);
 assert.equal(acPacket.claims[0].evidence[0], "runtime/server.js:gptPassthroughBodyText");
+assert.equal(acPacket.verification_receipts[0], "npm test --prefix runtime: pass");
 assert(!JSON.stringify(acPacket).includes("/Users/"));
 const acPrompt = proAcademicPrompt(acPacket);
 assert.match(acPrompt, /PRO_ACADEMIC_REVIEW/);
