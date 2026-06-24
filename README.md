@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> 最新版本請移至 **Tatwo Ultrawork**：https://github.com/tatwo214/tatwo-ultrawork
+> Latest version has moved to **Tatwo Ultrawork**: https://github.com/tatwo214/tatwo-ultrawork
+>
+> This repository is kept as a legacy JNSLayer2 reference for historical gateway / workflow details.
+
 # open-ultrawork
 
 `open-ultrawork` is a public skill/spec for **Claude Code Dynamic Workflows with cross-vendor multi-AI collaboration**. It is designed for tasks that need a controlling agent plus coordinated help from Claude Code Dynamic Workflows / ultracode, reviewer models, or lower-cost parallel subagents.
